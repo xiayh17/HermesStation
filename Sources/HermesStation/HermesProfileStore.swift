@@ -194,7 +194,7 @@ final class HermesProfileStore: ObservableObject {
         let provider = normalized.provider.lowercased()
         let descriptor = HermesProviderDescriptor.resolve(provider)
         guard provider == "custom" || descriptor != nil else {
-            lastSaveMessage = "Provider \(normalized.provider) 还没有在 menubar 里做真实映射，先直接用 Hermes CLI 改。"
+            lastSaveMessage = "Provider \(normalized.provider) 还没有在 HermesStation 里做真实映射，先直接用 Hermes CLI 改。"
             return
         }
 
@@ -352,7 +352,7 @@ final class HermesProfileStore: ObservableObject {
             notes.append("检测到旧的 OPENAI_BASE_URL。保存时会迁移到 config.yaml 的 model.base_url。")
         }
         if !provider.isEmpty, provider != "custom", descriptor == nil {
-            notes.append("当前 provider 没有在 menubar 里做映射，面板只能展示，不能安全保存。")
+            notes.append("当前 provider 没有在 HermesStation 里做映射，面板只能展示，不能安全保存。")
         }
 
         return HermesProfileSnapshot(

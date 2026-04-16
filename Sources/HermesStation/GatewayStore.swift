@@ -114,7 +114,7 @@ final class GatewayStore: ObservableObject {
     func exportAgentSession(id: String) {
         Task {
             do {
-                let exportDir = paths.hermesHome.appending(path: "menu-bar-exports", directoryHint: .isDirectory)
+                let exportDir = paths.hermesHome.appending(path: "exports", directoryHint: .isDirectory)
                 try FileManager.default.createDirectory(at: exportDir, withIntermediateDirectories: true)
                 let out = exportDir.appending(path: "session-\(id).jsonl")
                 let result = try await CommandRunner.runHermes(settingsStore.settings, ["sessions", "export", "--session-id", id, out.path])
@@ -248,7 +248,7 @@ final class GatewayStore: ObservableObject {
 
     private func createLogExcerpt(for sessionID: String) throws -> URL {
         let fm = FileManager.default
-        let excerptDir = paths.hermesHome.appending(path: "menu-bar-excerpts", directoryHint: .isDirectory)
+        let excerptDir = paths.hermesHome.appending(path: "excerpts", directoryHint: .isDirectory)
         try fm.createDirectory(at: excerptDir, withIntermediateDirectories: true)
 
         let logFiles = [
