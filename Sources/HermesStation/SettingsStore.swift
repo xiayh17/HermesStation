@@ -11,7 +11,7 @@ final class SettingsStore: ObservableObject {
 
     init() {
         let appSupport = fileManager.homeDirectoryForCurrentUser
-            .appending(path: "Library/Application Support/HermesStationMenuBar", directoryHint: .isDirectory)
+            .appending(path: "Library/Application Support/HermesStation", directoryHint: .isDirectory)
         settingsURL = appSupport.appending(path: "settings.json")
 
         let stored = Self.loadStoreFile(from: settingsURL) ?? .default

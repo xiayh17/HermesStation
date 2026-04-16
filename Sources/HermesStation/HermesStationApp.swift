@@ -2,7 +2,7 @@ import SwiftUI
 import AppKit
 
 @main
-struct HermesStationMenuBarApp: App {
+struct HermesStationApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var settingsStore: SettingsStore
     @StateObject private var profileStore: HermesProfileStore

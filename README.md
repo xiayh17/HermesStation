@@ -43,13 +43,13 @@ swift build
 This creates:
 
 ```
-dist/HermesStationMenuBar.app
+dist/HermesStation.app
 ```
 
 You can then open it with:
 
 ```bash
-open dist/HermesStationMenuBar.app
+open dist/HermesStation.app
 ```
 
 ## Architecture
@@ -60,7 +60,7 @@ This is a macOS menu bar app (`LSUIElement`) that monitors and controls a Hermes
 
 | Store | Responsibility |
 |-------|----------------|
-| `SettingsStore` | Reads/writes `~/Library/Application Support/HermesStationMenuBar/settings.json` |
+| `SettingsStore` | Reads/writes `~/Library/Application Support/HermesStation/settings.json` |
 | `HermesProfileStore` | Reads Hermes `config.yaml` + `.env`; writes via `hermes config set` CLI |
 | `GatewayStore` | Polls `gateway_state.json` + `state.db` on a timer; drives service control via launcher script |
 

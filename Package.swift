@@ -4,13 +4,13 @@
 import PackageDescription
 
 let package = Package(
-    name: "HermesStationMenuBar",
+    name: "HermesStation",
     platforms: [
         .macOS(.v14),
     ],
     targets: [
         .executableTarget(
-            name: "HermesStationMenuBar",
+            name: "HermesStation",
             linkerSettings: [
                 .linkedLibrary("sqlite3"),
             ]

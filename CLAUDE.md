@@ -6,9 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 swift build                        # debug build
-./scripts/package-app.sh           # build + bundle into dist/HermesStationMenuBar.app
-open dist/HermesStationMenuBar.app # launch the app
-pkill -f HermesStationMenuBar      # kill running instance before relaunch
+./scripts/package-app.sh           # build + bundle into dist/HermesStation.app
+open dist/HermesStation.app        # launch the app
+pkill -f HermesStation             # kill running instance before relaunch
 ```
 
 No tests, no linter, no Xcode project. The project uses Swift Package Manager (`Package.swift`) with Swift 6.2, targeting macOS 14+. Links `libsqlite3` at the system level.
@@ -20,8 +20,8 @@ This is a **macOS menu bar app** (`LSUIElement`) that monitors and controls a He
 ### Object Graph
 
 ```
-HermesStationMenuBarApp (@main)
- ├── SettingsStore        — reads/writes ~/Library/Application Support/HermesStationMenuBar/settings.json
+HermesStationApp (@main)
+ ├── SettingsStore        — reads/writes ~/Library/Application Support/HermesStation/settings.json
  ├── HermesProfileStore   — reads Hermes config.yaml + .env; writes via `hermes config set` CLI
  └── GatewayStore         — polls gateway_state.json + state.db on a timer; drives service control via launcher script
 ```
@@ -45,7 +45,7 @@ All three stores are `@MainActor ObservableObject`s, injected via `@EnvironmentO
 
 | Data | Location | Format |
 |------|----------|--------|
-| App settings | `~/Library/Application Support/HermesStationMenuBar/settings.json` | JSON (Codable) |
+| App settings | `~/Library/Application Support/HermesStation/settings.json` | JSON (Codable) |
 | Hermes config | `{hermesHome}/config.yaml` | YAML (hand-parsed) |
 | Hermes secrets | `{hermesHome}/.env` | dotenv (hand-parsed) |
 | Session data | `{hermesHome}/state.db` | SQLite3 (C API, read-only) |

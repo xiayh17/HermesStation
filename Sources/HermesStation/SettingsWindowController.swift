@@ -69,7 +69,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         window.contentViewController = hostingController
         window.delegate = self
         window.minSize = NSSize(width: 980, height: 620)
-        window.setFrameAutosaveName("HermesStationMenuBar.Settings")
+        window.setFrameAutosaveName("HermesStation.Settings")
         window.isReleasedWhenClosed = false
         window.center()
 

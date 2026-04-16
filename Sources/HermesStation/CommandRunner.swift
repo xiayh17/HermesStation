@@ -42,7 +42,7 @@ enum CommandRunner {
     static func runGateway(_ settings: AppSettings, _ args: [String]) async throws -> CommandResult {
         let command = HermesPaths(settings: settings).gatewayCommand(args)
         guard let executable = command.first else {
-            throw NSError(domain: "HermesStationMenuBar", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing gateway executable"])
+            throw NSError(domain: "HermesStation", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing gateway executable"])
         }
         return try await run(executable, Array(command.dropFirst()))
     }
@@ -50,7 +50,7 @@ enum CommandRunner {
     static func runHermes(_ settings: AppSettings, _ args: [String]) async throws -> CommandResult {
         let command = HermesPaths(settings: settings).hermesCommand(args)
         guard let executable = command.first else {
-            throw NSError(domain: "HermesStationMenuBar", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing Hermes executable"])
+            throw NSError(domain: "HermesStation", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing Hermes executable"])
         }
         return try await run(executable, Array(command.dropFirst()))
     }

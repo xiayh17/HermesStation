@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="/Users/xiayh/Projects/hermes-station-menubar"
 BUILD_DIR="$ROOT/.build/debug"
-APP_DIR="$ROOT/dist/HermesStationMenuBar.app"
+APP_DIR="$ROOT/dist/HermesStation.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 VERSION="0.1.0"
@@ -16,7 +16,7 @@ swift build
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR"
 
-cp "$BUILD_DIR/HermesStationMenuBar" "$MACOS_DIR/HermesStationMenuBar"
+cp "$BUILD_DIR/HermesStation" "$MACOS_DIR/HermesStation"
 
 cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -26,13 +26,13 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
   <key>CFBundleExecutable</key>
-  <string>HermesStationMenuBar</string>
+  <string>HermesStation</string>
   <key>CFBundleIdentifier</key>
-  <string>com.xiayh.HermesStationMenuBar</string>
+  <string>com.xiayh.HermesStation</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>HermesStationMenuBar</string>
+  <string>HermesStation</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
