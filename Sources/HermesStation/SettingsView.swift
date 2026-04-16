@@ -541,13 +541,20 @@ struct SettingsView: View {
                 Toggle("Enabled", isOn: providerEnabledBinding)
                 labeledField("Connection Name", text: providerDisplayNameBinding)
                 labeledField("Provider ID", text: providerIDBinding)
-                labeledField("Base URL", text: providerBaseURLBinding)
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("API Key")
-                        .font(.system(size: 12, weight: .medium))
-                    SecureField("API key", text: providerAPIKeyBinding)
-                        .textFieldStyle(.roundedBorder)
+                if selectedModelProviderDescriptor?.authType != .oauth {
+                    labeledField("Base URL", text: providerBaseURLBinding)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("API Key")
+                            .font(.system(size: 12, weight: .medium))
+                        SecureField("API key", text: providerAPIKeyBinding)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                }
+
+                if let authType = selectedModelProviderDescriptor?.authType, authType != .apiKey {
+                    oauthInfoBanner(authType: authType, forExistingProvider: true)
                 }
 
                 HStack {
@@ -653,13 +660,20 @@ struct SettingsView: View {
 
             labeledField("Connection Name", text: newProviderDisplayNameBinding)
             labeledField("Provider ID", text: newProviderIDBinding)
-            labeledField("Base URL", text: newProviderBaseURLBinding)
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("API Key")
-                    .font(.system(size: 12, weight: .medium))
-                SecureField("API key", text: newProviderAPIKeyBinding)
-                    .textFieldStyle(.roundedBorder)
+            if newProviderDescriptor?.authType != .oauth {
+                labeledField("Base URL", text: newProviderBaseURLBinding)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("API Key")
+                        .font(.system(size: 12, weight: .medium))
+                    SecureField("API key", text: newProviderAPIKeyBinding)
+                        .textFieldStyle(.roundedBorder)
+                }
+            }
+
+            if let authType = newProviderDescriptor?.authType, authType != .apiKey {
+                oauthInfoBanner(authType: authType, forExistingProvider: false)
             }
 
             Toggle("Enabled", isOn: newProviderEnabledBinding)
@@ -1211,6 +1225,40 @@ struct SettingsView: View {
             .foregroundStyle(.secondary)
     }
 
+    private func oauthInfoBanner(authType: ProviderAuthType, forExistingProvider: Bool) -> some View {
+        let (message, showOpenButton): (String, Bool) = {
+            switch authType {
+            case .oauth:
+                return ("该 Provider 使用 OAuth 认证（如设备码登录）。你需要先在终端运行 `hermes model` 完成登录，之后回到这里点击 Import Current 导入。", true)
+            case .mixed:
+                return ("该 Provider 支持 OAuth 或 API Key。如果你已有 API Key，可直接填写；否则请在终端运行 `hermes model` 进行 OAuth 登录。", true)
+            default:
+                return ("", false)
+            }
+        }()
+
+        return HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "info.circle.fill")
+                .foregroundStyle(.blue)
+            VStack(alignment: .leading, spacing: 8) {
+                Text(message)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if showOpenButton {
+                    Button("在终端打开 hermes model") {
+                        openTerminalWithHermesModel()
+                    }
+                    .controlSize(.small)
+                }
+            }
+            Spacer()
+        }
+        .padding(10)
+        .background(Color.blue.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
     private func summaryPill(title: String, value: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title)
@@ -1479,6 +1527,10 @@ struct SettingsView: View {
 
     private var selectedModelProviderDescriptor: HermesProviderDescriptor? {
         HermesProviderDescriptor.resolve(selectedModelProvider.providerID)
+    }
+
+    private var newProviderDescriptor: HermesProviderDescriptor? {
+        HermesProviderDescriptor.resolve(newProviderDraft.providerID)
     }
 
     private var selectedSavedModelIndex: Int? {
@@ -1869,6 +1921,21 @@ struct SettingsView: View {
         if trimmedName.isEmpty || trimmedName.hasPrefix("Provider ") || HermesProviderDescriptor.resolve(trimmedName) != nil {
             newProviderDraft.displayName = descriptor.displayName
         }
+
+        if descriptor.authType == .oauth {
+            newProviderDraft.baseURL = ""
+            newProviderDraft.apiKey = ""
+        }
+    }
+
+    private func openTerminalWithHermesModel() {
+        let launcherPath = appDraft.launcherPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let command = launcherPath.isEmpty ? "hermes model" : "\(launcherPath) model"
+        let escaped = command.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        let script = "tell application \"Terminal\" to do script \"\(escaped)\""
+        Task {
+            _ = try? await CommandRunner.run("/usr/bin/osascript", ["-e", script])
+        }
     }
 
     private func importCurrentHermesModel() {
@@ -2075,6 +2142,8 @@ struct SettingsView: View {
             issues.append(.init(severity: .error, message: "Base URL 不是合法的 http/https 地址。"))
         }
 
+        let authType = resolved?.authType ?? .apiKey
+
         if resolved?.id == "custom" {
             if baseURL.isEmpty {
                 issues.append(.init(severity: .error, message: "Custom provider 必须填写 Base URL。"))
@@ -2082,7 +2151,7 @@ struct SettingsView: View {
             if apiKey.isEmpty {
                 issues.append(.init(severity: .error, message: "Custom provider 必须填写 API Key。"))
             }
-        } else if let resolved, resolved.primaryAPIKeyEnvVar != nil, apiKey.isEmpty {
+        } else if authType == .apiKey, let resolved, resolved.primaryAPIKeyEnvVar != nil, apiKey.isEmpty {
             issues.append(.init(severity: .error, message: "\(resolved.displayName) 需要 API Key。"))
         }
 
@@ -2178,10 +2247,17 @@ struct SettingsView: View {
     }
 
     private var newProviderAvailabilityMessage: String {
-        if canAdvanceAddAPIWizard {
+        if !canAdvanceAddAPIWizard {
+            return "至少要填写 Provider ID；Custom 还需要 Base URL 和 API Key。"
+        }
+        switch newProviderDescriptor?.authType {
+        case .oauth:
+            return "该 Provider 通过 OAuth 认证，不需要 API Key。继续下一页配置模型。"
+        case .mixed:
+            return "该 Provider 支持 OAuth 或 API Key。如未配置 OAuth，请填写 API Key。"
+        default:
             return "连接信息足够，继续下一页配置模型。"
         }
-        return "至少要填写 Provider ID；Custom 还需要 Base URL 和 API Key。"
     }
 
     private var newProviderModelMessage: String {

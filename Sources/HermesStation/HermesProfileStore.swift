@@ -1,11 +1,18 @@
 import Foundation
 import Combine
 
+enum ProviderAuthType: Equatable {
+    case apiKey
+    case oauth
+    case mixed
+}
+
 struct HermesProviderDescriptor: Identifiable, Equatable {
     let id: String
     let displayName: String
     let apiKeyEnvVars: [String]
     let baseURLEnvVar: String?
+    let authType: ProviderAuthType
 
     var primaryAPIKeyEnvVar: String? {
         apiKeyEnvVars.first
@@ -29,27 +36,28 @@ struct HermesProviderDescriptor: Identifiable, Equatable {
     }
 
     static let knownProviders: [HermesProviderDescriptor] = [
-        .init(id: "custom", displayName: "Custom / OpenAI-compatible", apiKeyEnvVars: ["OPENAI_API_KEY"], baseURLEnvVar: nil),
-        .init(id: "openrouter", displayName: "OpenRouter", apiKeyEnvVars: ["OPENROUTER_API_KEY"], baseURLEnvVar: "OPENROUTER_BASE_URL"),
-        .init(id: "anthropic", displayName: "Anthropic", apiKeyEnvVars: ["ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"], baseURLEnvVar: nil),
-        .init(id: "gemini", displayName: "Google AI Studio", apiKeyEnvVars: ["GOOGLE_API_KEY", "GEMINI_API_KEY"], baseURLEnvVar: "GEMINI_BASE_URL"),
-        .init(id: "zai", displayName: "Z.AI / GLM", apiKeyEnvVars: ["GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"], baseURLEnvVar: "GLM_BASE_URL"),
-        .init(id: "kimi-coding", displayName: "Kimi / Moonshot", apiKeyEnvVars: ["KIMI_API_KEY"], baseURLEnvVar: "KIMI_BASE_URL"),
-        .init(id: "minimax", displayName: "MiniMax", apiKeyEnvVars: ["MINIMAX_API_KEY"], baseURLEnvVar: "MINIMAX_BASE_URL"),
-        .init(id: "minimax-cn", displayName: "MiniMax (China)", apiKeyEnvVars: ["MINIMAX_CN_API_KEY"], baseURLEnvVar: "MINIMAX_CN_BASE_URL"),
-        .init(id: "alibaba", displayName: "Alibaba / DashScope", apiKeyEnvVars: ["DASHSCOPE_API_KEY"], baseURLEnvVar: "DASHSCOPE_BASE_URL"),
-        .init(id: "xai", displayName: "xAI", apiKeyEnvVars: ["XAI_API_KEY"], baseURLEnvVar: "XAI_BASE_URL"),
-        .init(id: "ai-gateway", displayName: "AI Gateway", apiKeyEnvVars: ["AI_GATEWAY_API_KEY"], baseURLEnvVar: "AI_GATEWAY_BASE_URL"),
-        .init(id: "opencode-zen", displayName: "OpenCode Zen", apiKeyEnvVars: ["OPENCODE_ZEN_API_KEY"], baseURLEnvVar: "OPENCODE_ZEN_BASE_URL"),
-        .init(id: "opencode-go", displayName: "OpenCode Go", apiKeyEnvVars: ["OPENCODE_GO_API_KEY"], baseURLEnvVar: "OPENCODE_GO_BASE_URL"),
-        .init(id: "kilocode", displayName: "Kilo Code", apiKeyEnvVars: ["KILOCODE_API_KEY"], baseURLEnvVar: "KILOCODE_BASE_URL"),
-        .init(id: "huggingface", displayName: "Hugging Face", apiKeyEnvVars: ["HF_TOKEN"], baseURLEnvVar: "HF_BASE_URL"),
-        .init(id: "xiaomi", displayName: "Xiaomi MiMo", apiKeyEnvVars: ["XIAOMI_API_KEY"], baseURLEnvVar: "XIAOMI_BASE_URL"),
-        .init(id: "nous", displayName: "Nous Portal", apiKeyEnvVars: [], baseURLEnvVar: nil),
-        .init(id: "openai-codex", displayName: "OpenAI Codex", apiKeyEnvVars: [], baseURLEnvVar: nil),
-        .init(id: "qwen-oauth", displayName: "Qwen OAuth", apiKeyEnvVars: [], baseURLEnvVar: nil),
-        .init(id: "copilot", displayName: "GitHub Copilot", apiKeyEnvVars: ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"], baseURLEnvVar: nil),
-        .init(id: "copilot-acp", displayName: "GitHub Copilot ACP", apiKeyEnvVars: [], baseURLEnvVar: "COPILOT_ACP_BASE_URL"),
+        .init(id: "custom", displayName: "Custom / OpenAI-compatible", apiKeyEnvVars: ["OPENAI_API_KEY"], baseURLEnvVar: nil, authType: .apiKey),
+        .init(id: "openrouter", displayName: "OpenRouter", apiKeyEnvVars: ["OPENROUTER_API_KEY"], baseURLEnvVar: "OPENROUTER_BASE_URL", authType: .apiKey),
+        .init(id: "anthropic", displayName: "Anthropic", apiKeyEnvVars: ["ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"], baseURLEnvVar: nil, authType: .apiKey),
+        .init(id: "gemini", displayName: "Google AI Studio", apiKeyEnvVars: ["GOOGLE_API_KEY", "GEMINI_API_KEY"], baseURLEnvVar: "GEMINI_BASE_URL", authType: .apiKey),
+        .init(id: "zai", displayName: "Z.AI / GLM", apiKeyEnvVars: ["GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"], baseURLEnvVar: "GLM_BASE_URL", authType: .apiKey),
+        .init(id: "kimi-coding", displayName: "Kimi / Moonshot", apiKeyEnvVars: ["KIMI_API_KEY"], baseURLEnvVar: "KIMI_BASE_URL", authType: .apiKey),
+        .init(id: "minimax", displayName: "MiniMax", apiKeyEnvVars: ["MINIMAX_API_KEY"], baseURLEnvVar: "MINIMAX_BASE_URL", authType: .apiKey),
+        .init(id: "minimax-cn", displayName: "MiniMax (China)", apiKeyEnvVars: ["MINIMAX_CN_API_KEY"], baseURLEnvVar: "MINIMAX_CN_BASE_URL", authType: .apiKey),
+        .init(id: "alibaba", displayName: "Alibaba / DashScope", apiKeyEnvVars: ["DASHSCOPE_API_KEY"], baseURLEnvVar: "DASHSCOPE_BASE_URL", authType: .apiKey),
+        .init(id: "xai", displayName: "xAI", apiKeyEnvVars: ["XAI_API_KEY"], baseURLEnvVar: "XAI_BASE_URL", authType: .apiKey),
+        .init(id: "ai-gateway", displayName: "AI Gateway", apiKeyEnvVars: ["AI_GATEWAY_API_KEY"], baseURLEnvVar: "AI_GATEWAY_BASE_URL", authType: .apiKey),
+        .init(id: "opencode-zen", displayName: "OpenCode Zen", apiKeyEnvVars: ["OPENCODE_ZEN_API_KEY"], baseURLEnvVar: "OPENCODE_ZEN_BASE_URL", authType: .apiKey),
+        .init(id: "opencode-go", displayName: "OpenCode Go", apiKeyEnvVars: ["OPENCODE_GO_API_KEY"], baseURLEnvVar: "OPENCODE_GO_BASE_URL", authType: .apiKey),
+        .init(id: "kilocode", displayName: "Kilo Code", apiKeyEnvVars: ["KILOCODE_API_KEY"], baseURLEnvVar: "KILOCODE_BASE_URL", authType: .apiKey),
+        .init(id: "huggingface", displayName: "Hugging Face", apiKeyEnvVars: ["HF_TOKEN"], baseURLEnvVar: "HF_BASE_URL", authType: .apiKey),
+        .init(id: "xiaomi", displayName: "Xiaomi MiMo", apiKeyEnvVars: ["XIAOMI_API_KEY"], baseURLEnvVar: "XIAOMI_BASE_URL", authType: .apiKey),
+        .init(id: "nous", displayName: "Nous Portal", apiKeyEnvVars: [], baseURLEnvVar: nil, authType: .oauth),
+        .init(id: "openai-codex", displayName: "OpenAI Codex", apiKeyEnvVars: [], baseURLEnvVar: nil, authType: .oauth),
+        .init(id: "qwen-oauth", displayName: "Qwen OAuth", apiKeyEnvVars: [], baseURLEnvVar: nil, authType: .oauth),
+        .init(id: "copilot", displayName: "GitHub Copilot", apiKeyEnvVars: ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"], baseURLEnvVar: nil, authType: .mixed),
+        .init(id: "copilot-acp", displayName: "GitHub Copilot ACP", apiKeyEnvVars: [], baseURLEnvVar: "COPILOT_ACP_BASE_URL", authType: .apiKey),
+        .init(id: "arcee", displayName: "Arcee AI", apiKeyEnvVars: ["ARCEEAI_API_KEY"], baseURLEnvVar: "ARCEEAI_BASE_URL", authType: .apiKey),
     ]
 
     private static let aliases: [String: String] = [
