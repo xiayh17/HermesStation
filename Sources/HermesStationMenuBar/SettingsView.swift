@@ -782,6 +782,7 @@ struct SettingsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(selectedSavedModelID == model.id ? Color.accentColor.opacity(0.08) : Color.secondary.opacity(0.05))
             .clipShape(RoundedRectangle(cornerRadius: 10))
+            .hoverPlate(cornerRadius: 10)
         }
         .buttonStyle(.plain)
     }
@@ -1245,6 +1246,8 @@ struct SettingsView: View {
             }
         }
         .padding(.vertical, 3)
+        .contentShape(Rectangle())
+        .hoverPlate(cornerRadius: 6)
     }
 
     private func detailRow(_ title: String, _ value: String) -> some View {
@@ -1276,6 +1279,8 @@ struct SettingsView: View {
             }
         }
         .padding(.vertical, 3)
+        .contentShape(Rectangle())
+        .hoverPlate(cornerRadius: 6)
     }
 
     private func capabilityTagWrap(_ capabilities: [ModelCapability]) -> some View {
@@ -1305,6 +1310,7 @@ struct SettingsView: View {
                 .background(selected ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.08))
                 .foregroundStyle(selected ? Color.accentColor : Color.secondary)
                 .clipShape(Capsule())
+                .hoverPlate(cornerRadius: 999)
         }
         .buttonStyle(.plain)
     }
@@ -1349,6 +1355,8 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
         }
         .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .hoverPlate(cornerRadius: 8)
     }
 
     @ViewBuilder

@@ -85,18 +85,42 @@ struct MenuContentView: View {
                 if !store.snapshot.serviceInstalled {
                     Button("Install") { store.installOrRepairService() }
                         .disabled(store.isBusy)
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .hoverPlate(cornerRadius: 6)
                 } else if !store.snapshot.serviceLoaded {
                     Button("Repair") { store.installOrRepairService() }
                         .disabled(store.isBusy)
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .hoverPlate(cornerRadius: 6)
                     Button("Start") { store.startService() }
                         .disabled(store.isBusy)
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .hoverPlate(cornerRadius: 6)
                 } else {
                     Button("Restart") { store.restartService() }
                         .disabled(store.isBusy)
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .hoverPlate(cornerRadius: 6)
                     Button("Stop") { store.stopService() }
                         .disabled(store.isBusy)
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .hoverPlate(cornerRadius: 6)
                     Button("Reinstall") { store.installOrRepairService() }
                         .disabled(store.isBusy)
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .hoverPlate(cornerRadius: 6)
                 }
             }
         }
@@ -117,6 +141,10 @@ struct MenuContentView: View {
                     Text(value?.state ?? "unknown")
                         .foregroundStyle(.secondary)
                 }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .contentShape(Rectangle())
+                .hoverPlate(cornerRadius: 6)
             }
         }
     }
@@ -149,8 +177,16 @@ struct MenuContentView: View {
                     gatewayStore: store
                 )
             }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .hoverPlate(cornerRadius: 6)
             Spacer()
             Button("Quit") { NSApp.terminate(nil) }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .hoverPlate(cornerRadius: 6)
         }
     }
 
