@@ -1,4 +1,4 @@
-# Hermes Station Menu Bar
+# HermesStation
 
 A native macOS menu bar app for monitoring and operating [Hermes](https://github.com/xiayh17/hermes) gateway profiles.
 

@@ -34,7 +34,7 @@ struct MenuContentView: View {
             HStack {
                 Image(systemName: store.snapshot.menuBarSymbol)
                     .foregroundStyle(iconColor)
-                Text("Hermes Station")
+                Text("HermesStation")
                     .font(.headline)
                 Spacer()
                 Menu(settingsStore.settings.displayName) {

@@ -17,7 +17,7 @@ struct HermesStationMenuBarApp: App {
     }
 
     var body: some Scene {
-        MenuBarExtra("Hermes Station", systemImage: store.snapshot.menuBarSymbol) {
+        MenuBarExtra("HermesStation", systemImage: store.snapshot.menuBarSymbol) {
             MenuContentView()
                 .environmentObject(store)
                 .environmentObject(settingsStore)
