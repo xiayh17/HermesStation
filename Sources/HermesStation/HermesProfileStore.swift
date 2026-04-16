@@ -110,7 +110,10 @@ struct HermesProfileDraft: Equatable {
         HermesProfileDraft(
             provider: provider.trimmingCharacters(in: .whitespacesAndNewlines),
             modelName: modelName.trimmingCharacters(in: .whitespacesAndNewlines),
-            baseURL: baseURL.trimmingCharacters(in: .whitespacesAndNewlines),
+            baseURL: SavedProviderConnection.normalizedBaseURL(
+                providerID: provider,
+                baseURL: baseURL
+            ),
             apiKey: apiKey.trimmingCharacters(in: .whitespacesAndNewlines),
             terminalCwd: terminalCwd.trimmingCharacters(in: .whitespacesAndNewlines),
             messagingCwd: messagingCwd.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -121,6 +124,7 @@ struct HermesProfileDraft: Equatable {
 struct HermesProfileSnapshot: Equatable {
     let configURL: URL
     let envURL: URL
+    let soulURL: URL
     let draft: HermesProfileDraft
     let providerDescriptor: HermesProviderDescriptor?
     let routing: HermesRoutingSummary
@@ -131,6 +135,7 @@ struct HermesProfileSnapshot: Equatable {
         return HermesProfileSnapshot(
             configURL: paths.hermesHome.appending(path: "config.yaml"),
             envURL: paths.hermesHome.appending(path: ".env"),
+            soulURL: paths.hermesHome.appending(path: "SOUL.md"),
             draft: .empty,
             providerDescriptor: nil,
             routing: .empty,
@@ -314,10 +319,211 @@ final class HermesProfileStore: ObservableObject {
         Task { _ = try? await CommandRunner.openPath(snapshot.envURL) }
     }
 
+    func openSoulFile() {
+        Task { _ = try? await CommandRunner.openPath(snapshot.soulURL) }
+    }
+
+    // MARK: - Model Health
+
+    enum ModelHealthStatus: Equatable {
+        case unknown
+        case checking
+        case healthy
+        case unhealthy(String, Int?)
+        case authError
+        case noModel
+
+        var isHealthy: Bool {
+            if case .healthy = self { return true }
+            return false
+        }
+
+        var displayText: String {
+            switch self {
+            case .unknown: return "未检查"
+            case .checking: return "检查中..."
+            case .healthy: return "可用"
+            case .unhealthy(let reason, _): return "不可用: \(reason)"
+            case .authError: return "认证失败"
+            case .noModel: return "未配置模型"
+            }
+        }
+    }
+
+    struct ModelHealthResult: Equatable {
+        let provider: String
+        let model: String
+        let status: ModelHealthStatus
+    }
+
+    nonisolated func checkModelHealth(provider: String, baseURL: String, apiKey: String, model: String) async -> ModelHealthStatus {
+        guard !model.isEmpty else { return .noModel }
+        guard !baseURL.isEmpty, !apiKey.isEmpty else { return .unhealthy("缺少 base URL 或 API Key", nil) }
+
+        guard let url = Self.healthEndpointURL(provider: provider, baseURL: baseURL, path: "chat/completions") else {
+            return .unhealthy("无效的 base URL", nil)
+        }
+
+        let payload: [String: Any] = [
+            "model": model,
+            "messages": [["role": "user", "content": "hi"]],
+            "max_tokens": 1
+        ]
+
+        guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
+            return .unhealthy("请求构造失败", nil)
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        for (header, value) in Self.providerSpecificHeaders(provider: provider, baseURL: baseURL) {
+            request.setValue(value, forHTTPHeaderField: header)
+        }
+        request.httpBody = body
+        request.timeoutInterval = 15
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                return .unhealthy("无效响应", nil)
+            }
+
+            let bodyString = String(data: data, encoding: .utf8) ?? ""
+
+            switch httpResponse.statusCode {
+            case 200...299:
+                return .healthy
+            case 401, 403:
+                return .authError
+            case 404:
+                if bodyString.contains("resource_not_found_error") || bodyString.contains("model") && bodyString.contains("not found") {
+                    return .unhealthy("模型不存在 (404)", 404)
+                }
+                return .unhealthy("接口不存在 (404)", 404)
+            case 400:
+                if bodyString.contains("context") || bodyString.contains("too long") || bodyString.contains("length") || bodyString.contains("tokens") {
+                    return .healthy
+                }
+                if bodyString.contains("model") && (bodyString.contains("not exist") || bodyString.contains("not supported") || bodyString.contains("invalid")) {
+                    return .unhealthy("模型不存在 (400)", 400)
+                }
+                return .unhealthy("请求错误 (400)", 400)
+            case 429:
+                return .healthy
+            case 500...599:
+                return .unhealthy("服务端错误 (\(httpResponse.statusCode))", httpResponse.statusCode)
+            default:
+                return .unhealthy("HTTP \(httpResponse.statusCode)", httpResponse.statusCode)
+            }
+        } catch URLError.timedOut {
+            return .unhealthy("请求超时", nil)
+        } catch {
+            return .unhealthy(error.localizedDescription, nil)
+        }
+    }
+
+    nonisolated func fetchAvailableModels(provider: String, baseURL: String, apiKey: String) async -> [String] {
+        guard !baseURL.isEmpty, !apiKey.isEmpty else { return [] }
+        guard let url = Self.healthEndpointURL(provider: provider, baseURL: baseURL, path: "models") else {
+            return []
+        }
+
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        for (header, value) in Self.providerSpecificHeaders(provider: provider, baseURL: baseURL) {
+            request.setValue(value, forHTTPHeaderField: header)
+        }
+        request.timeoutInterval = 10
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+                return []
+            }
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let modelList = json["data"] as? [[String: Any]] else {
+                return []
+            }
+            return modelList.compactMap { $0["id"] as? String }
+        } catch {
+            return []
+        }
+    }
+
+    func fallbackModel(for providerID: String) -> String? {
+        let normalized = providerID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let canonical = HermesProviderDescriptor.resolve(normalized)?.id ?? normalized
+        switch canonical {
+        case "kimi-coding", "kimi", "moonshot":
+            return "kimi-for-coding"
+        case "openrouter":
+            return "openai/gpt-4o"
+        case "anthropic":
+            return "claude-sonnet-4-20250514"
+        case "gemini", "google-ai-studio":
+            return "gemini-2.0-flash"
+        case "minimax", "minimax-cn":
+            return "minimax-text-01"
+        case "alibaba", "dashscope":
+            return "qwen-max"
+        case "xai":
+            return "grok-3"
+        case "zai", "glm":
+            return "glm-4-plus"
+        case "custom":
+            return "gpt-4o"
+        default:
+            return "gpt-4o"
+        }
+    }
+
+    func autoFixModel(provider: String, model: String) async -> (success: Bool, message: String, newDraft: HermesProfileDraft?) {
+        let draft = snapshot.draft
+        let fixedBaseURL = draft.baseURL
+        let fixedAPIKey = draft.apiKey
+
+        let available = await fetchAvailableModels(provider: provider, baseURL: fixedBaseURL, apiKey: fixedAPIKey)
+        let replacement: String
+        if let firstAvailable = available.first {
+            if available.contains(model) {
+                return (false, "模型 \(model) 在 /v1/models 列表中存在，可能只是临时不可用。请手动检查。", nil)
+            }
+            replacement = firstAvailable
+        } else if let fallback = fallbackModel(for: provider) {
+            replacement = fallback
+        } else {
+            return (false, "无法获取可用模型列表，也没有内置 fallback。", nil)
+        }
+
+        let newDraft = HermesProfileDraft(
+            provider: provider,
+            modelName: replacement,
+            baseURL: draft.baseURL,
+            apiKey: draft.apiKey,
+            terminalCwd: draft.terminalCwd,
+            messagingCwd: draft.messagingCwd
+        )
+
+        let descriptor = HermesProviderDescriptor.resolve(provider)
+        do {
+            try await Self.apply(settings: settingsStore.settings, draft: newDraft, descriptor: descriptor)
+            await MainActor.run {
+                self.snapshot = Self.loadSnapshot(settings: settingsStore.settings)
+                self.lastSaveMessage = "已将失效模型 \(model) 修复为 \(replacement)。重启 gateway 后生效。"
+            }
+            return (true, "已将失效模型 \(model) 修复为 \(replacement)。", newDraft)
+        } catch {
+            return (false, "修复失败: \(error.localizedDescription)", nil)
+        }
+    }
+
     private static func loadSnapshot(settings: AppSettings) -> HermesProfileSnapshot {
         let paths = HermesPaths(settings: settings)
-        let configURL = paths.hermesHome.appending(path: "config.yaml")
-        let envURL = paths.hermesHome.appending(path: ".env")
+        let configURL = paths.configURL
+        let envURL = paths.envURL
+        let soulURL = paths.soulURL
 
         let configValues = parseConfigValues(from: configURL)
         let envValues = parseEnvValues(from: envURL)
@@ -331,8 +537,16 @@ final class HermesProfileStore: ObservableObject {
         let effectiveBaseURL: String
         if provider == "custom" {
             effectiveBaseURL = !modelBaseURL.isEmpty ? modelBaseURL : legacyOpenAIBaseURL
-        } else if let envVar = descriptor?.baseURLEnvVar, let value = envValues[envVar], !value.isEmpty {
-            effectiveBaseURL = value
+        } else if let envVar = descriptor?.baseURLEnvVar {
+            let configuredBaseURL = envValues[envVar] ?? configValues[envVar] ?? ""
+            if !configuredBaseURL.isEmpty {
+                effectiveBaseURL = SavedProviderConnection.normalizedBaseURL(
+                    providerID: provider,
+                    baseURL: configuredBaseURL
+                )
+            } else {
+                effectiveBaseURL = modelBaseURL
+            }
         } else {
             effectiveBaseURL = modelBaseURL
         }
@@ -366,6 +580,7 @@ final class HermesProfileStore: ObservableObject {
         return HermesProfileSnapshot(
             configURL: configURL,
             envURL: envURL,
+            soulURL: soulURL,
             draft: HermesProfileDraft(
                 provider: provider,
                 modelName: modelName,
@@ -385,6 +600,28 @@ final class HermesProfileStore: ObservableObject {
             ),
             notes: notes
         )
+    }
+
+    private nonisolated static func healthEndpointURL(provider: String, baseURL: String, path: String) -> URL? {
+        let normalizedBaseURL = SavedProviderConnection.normalizedBaseURL(providerID: provider, baseURL: baseURL)
+        guard !normalizedBaseURL.isEmpty else { return nil }
+
+        let prefix: String
+        if normalizedBaseURL.lowercased().hasSuffix("/v1") {
+            prefix = normalizedBaseURL
+        } else {
+            prefix = "\(normalizedBaseURL)/v1"
+        }
+
+        return URL(string: "\(prefix)/\(path)")
+    }
+
+    private nonisolated static func providerSpecificHeaders(provider: String, baseURL: String) -> [String: String] {
+        let normalizedBaseURL = SavedProviderConnection.normalizedBaseURL(providerID: provider, baseURL: baseURL).lowercased()
+        if normalizedBaseURL.contains("api.kimi.com") {
+            return ["User-Agent": "KimiCLI/1.30.0"]
+        }
+        return [:]
     }
 
     private static func apply(settings: AppSettings, draft: HermesProfileDraft, descriptor: HermesProviderDescriptor?) async throws {
@@ -425,7 +662,7 @@ final class HermesProfileStore: ObservableObject {
         }
     }
 
-    private static func parseConfigValues(from url: URL) -> [String: String] {
+    static func parseConfigValues(from url: URL) -> [String: String] {
         guard let content = readText(at: url) else { return [:] }
 
         var values: [String: String] = [:]
@@ -459,7 +696,7 @@ final class HermesProfileStore: ObservableObject {
         return values
     }
 
-    private static func parseEnvValues(from url: URL) -> [String: String] {
+    static func parseEnvValues(from url: URL) -> [String: String] {
         guard let content = readText(at: url) else { return [:] }
 
         var values: [String: String] = [:]

@@ -64,6 +64,47 @@ struct SavedProviderConnection: Codable, Equatable, Identifiable {
             models: [SavedModelEntry.blank()]
         )
     }
+
+    private static let kimiCodingBaseURL = "https://api.kimi.com/coding/v1"
+
+    static func normalizedBaseURL(providerID: String, baseURL: String) -> String {
+        let trimmedBaseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedBaseURL.isEmpty else { return "" }
+
+        let normalizedProviderID = HermesProviderDescriptor.resolve(providerID)?.id
+            ?? providerID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let strippedBaseURL: String
+        if trimmedBaseURL.hasSuffix("/") {
+            strippedBaseURL = String(trimmedBaseURL.dropLast())
+        } else {
+            strippedBaseURL = trimmedBaseURL
+        }
+
+        if normalizedProviderID == "kimi-coding",
+           strippedBaseURL.caseInsensitiveCompare("https://api.kimi.com/coding") == .orderedSame {
+            return kimiCodingBaseURL
+        }
+
+        return strippedBaseURL
+    }
+
+    static func hasKimiCodingV1Issue(providerID: String, baseURL: String) -> Bool {
+        let normalizedProviderID = HermesProviderDescriptor.resolve(providerID)?.id
+            ?? providerID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard normalizedProviderID == "kimi-coding" else { return false }
+
+        let trimmedBaseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedBaseURL.isEmpty else { return false }
+
+        let strippedBaseURL: String
+        if trimmedBaseURL.hasSuffix("/") {
+            strippedBaseURL = String(trimmedBaseURL.dropLast())
+        } else {
+            strippedBaseURL = trimmedBaseURL
+        }
+
+        return strippedBaseURL.caseInsensitiveCompare("https://api.kimi.com/coding") == .orderedSame
+    }
 }
 
 struct AppSettings: Codable, Equatable, Identifiable {

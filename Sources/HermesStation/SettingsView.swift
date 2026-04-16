@@ -6,6 +6,7 @@ private enum SettingsTab: Hashable {
     case model
     case sessions
     case usage
+    case platforms
     case environment
 }
 
@@ -107,7 +108,15 @@ private enum AddAPIWizardPage: Int, CaseIterable {
 private enum ModelSidebarDestination: Hashable {
     case current
     case routing
+    case health
     case provider(UUID)
+}
+
+private struct ModelHealthProbeTarget {
+    let provider: String
+    let model: String
+    let baseURL: String
+    let apiKey: String
 }
 
 struct SettingsView: View {
@@ -141,6 +150,23 @@ struct SettingsView: View {
     @State private var agentFilter: AgentPanelFilter = .all
     @State private var agentRenameDraft: String = ""
     @State private var showDeleteAgentAlert = false
+    @State private var showDeleteProviderAlert = false
+    @State private var selectedAgentTranscript: SessionTranscript? = nil
+    @State private var isLoadingTranscript = false
+    @State private var selectedPlatformInstanceID: String?
+    @State private var platformInstancesCache: [PlatformInstance] = []
+    @State private var platformConfigDrafts: [String: String] = [:]
+    @State private var showAddPlatformWizard = false
+    @State private var newPlatformPresetID = ""
+    @State private var newPlatformConfigDrafts: [String: String] = [:]
+    @State private var isSavingPlatforms = false
+    @State private var platformStatusMessage: String?
+    @State private var platformDraftOverrides: [String: [String: String]] = [:]
+    @State private var platformDiagnosticSummary: String?
+    @State private var platformDiagnosticLines: [String] = []
+    @State private var modelHealthResults: [HermesProfileStore.ModelHealthResult] = []
+    @State private var isCheckingModelHealth = false
+    @State private var modelHealthFixMessage: String?
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -156,6 +182,9 @@ struct SettingsView: View {
             usageTab
                 .tabItem { Label("Usage", systemImage: "chart.bar") }
                 .tag(SettingsTab.usage)
+            platformsTab
+                .tabItem { Label("Platforms", systemImage: "network") }
+                .tag(SettingsTab.platforms)
             environmentTab
                 .tabItem { Label("环境", systemImage: "folder") }
                 .tag(SettingsTab.environment)
@@ -164,16 +193,32 @@ struct SettingsView: View {
         .onAppear {
             guard !hasLoadedDraft else { return }
             syncDrafts()
+            refreshPlatformInstances()
             hasLoadedDraft = true
         }
         .onChange(of: settingsStore.settings) { _, newValue in
             appDraft = newValue
+            platformDraftOverrides = [:]
+            platformStatusMessage = nil
+            selectedPlatformInstanceID = nil
+            refreshPlatformInstances()
             syncModelSelection()
         }
         .onChange(of: profileStore.snapshot) { _, newValue in
             hermesDraft = newValue.draft
             auxiliaryProviderDrafts = Dictionary(uniqueKeysWithValues: newValue.routing.auxiliaryRoutes.map { ($0.task, $0.provider) })
             syncSmartRoutingDrafts(from: newValue.routing)
+            refreshPlatformInstances()
+            refreshPlatformDiagnostics()
+        }
+        .onChange(of: gatewayStore.snapshot.runtime?.updatedAt) { _, _ in
+            refreshPlatformDiagnostics()
+        }
+        .onChange(of: gatewayStore.snapshot.serviceStatus) { _, _ in
+            refreshPlatformDiagnostics()
+        }
+        .onChange(of: selectedPlatformInstanceID) { _, _ in
+            refreshPlatformDiagnostics()
         }
         .onChange(of: selectedModelProviderID) { _, _ in
             syncSelectedSavedModel()
@@ -187,9 +232,11 @@ struct SettingsView: View {
         .onChange(of: selectedAgentID) { _, newValue in
             guard let newValue, let agent = gatewayStore.snapshot.agentSessions.rows.first(where: { $0.id == newValue }) else {
                 agentRenameDraft = ""
+                selectedAgentTranscript = nil
                 return
             }
             agentRenameDraft = agent.title
+            loadTranscript(for: agent)
         }
         .onChange(of: gatewayStore.snapshot.agentSessions.totalCount) { _, _ in
             syncAgentSelection()
@@ -203,9 +250,11 @@ struct SettingsView: View {
             Section("Profiles") {
                 Picker("Current Profile", selection: activeSettingsProfileID) {
                     ForEach(settingsStore.profiles) { profile in
-                        Text(profile.displayName).tag(profile.id)
+                        Text(profileSwitcherLabel(for: profile)).tag(profile.id)
                     }
                 }
+
+                activeProfileScopeBanner
 
                 HStack {
                     Button("New") {
@@ -220,12 +269,15 @@ struct SettingsView: View {
                     .disabled(settingsStore.profiles.count <= 1)
                 }
 
-                mappingHint("切换后，菜单栏监控、Gateway 控制和模型配置都会指向当前激活的 profile。")
+                mappingHint("切换 profile，等价于把 menubar 和 Hermes 切到另一套隔离环境，而不只是换一个显示名。")
+
+                profileMeaningOverview
             }
 
             Section("Menubar 应用") {
                 labeledField("Display Name", text: $appDraft.displayName)
-                labeledField("Hermes Profile", text: $appDraft.profileName)
+                labeledField("Hermes Profile ID", text: $appDraft.profileName)
+                mappingHint("这个 ID 会进入 `.hermes-home/profiles/<id>`、Hermes 的 `-p <id>` 参数，以及 `ai.hermes.gateway-<id>` 服务标签。")
                 labeledField("Project Root", text: $appDraft.projectRootPath)
                 labeledField("Workspace Root", text: $appDraft.workspaceRootPath)
                 labeledField("Launcher", text: $appDraft.launcherPath)
@@ -243,14 +295,7 @@ struct SettingsView: View {
             }
 
             Section("派生路径") {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Hermes Home")
-                        .font(.system(size: 12, weight: .medium))
-                    Text(HermesPaths(settings: appDraft).hermesHome.path)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                }
+                profileScopePreview
             }
 
             Section {
@@ -294,6 +339,19 @@ struct SettingsView: View {
         .sheet(isPresented: $showAddAPIWizard) {
             addAPIWizardSheet
         }
+        .alert("删除 Provider?", isPresented: $showDeleteProviderAlert) {
+            Button("删除", role: .destructive) {
+                removeSelectedModelProvider()
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            let provider = selectedModelProvider
+            if !provider.displayName.isEmpty && provider.displayName != "Provider" {
+                Text("这会从本地目录移除 \(provider.displayName) 及其下的所有模型配置。")
+            } else {
+                Text("这会从本地目录移除该 Provider 及其下的所有模型配置。")
+            }
+        }
     }
 
     private var modelProviderSidebar: some View {
@@ -313,6 +371,13 @@ struct SettingsView: View {
                         systemImage: "point.3.connected.trianglepath.dotted"
                     )
                     .tag(ModelSidebarDestination.routing)
+
+                    providerSidebarRow(
+                        title: "Model Health",
+                        subtitle: modelHealthSidebarSubtitle,
+                        systemImage: modelHealthIconName
+                    )
+                    .tag(ModelSidebarDestination.health)
                 }
 
                 Section("Provider APIs") {
@@ -323,6 +388,14 @@ struct SettingsView: View {
                             systemImage: isProviderActive(provider) ? "checkmark.circle.fill" : "network"
                         )
                         .tag(ModelSidebarDestination.provider(provider.id))
+                        .contextMenu {
+                            Button {
+                                selectedModelProviderID = provider.id
+                                showDeleteProviderAlert = true
+                            } label: {
+                                Label("删除", systemImage: "trash")
+                            }
+                        }
                     }
                 }
             }
@@ -372,6 +445,17 @@ struct SettingsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     routingRealitySection
+                    hermesNotesSection
+                }
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            .background(Color(nsColor: .windowBackgroundColor))
+
+        case .health:
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    modelHealthSection
                     hermesNotesSection
                 }
                 .padding(20)
@@ -525,6 +609,67 @@ struct SettingsView: View {
         }
     }
 
+    private var modelHealthSection: some View {
+        GroupBox("Model Health") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("直接探测当前 Hermes 配置中的模型是否真正可用（不依赖 gateway）。")
+                        Text("会检查当前主模型；如果配置了 smart routing，也会按对应 provider/model 的保存连接信息一起检查。")
+                    }
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button(isCheckingModelHealth ? "检查中..." : "检查可用性") {
+                        runModelHealthChecks()
+                    }
+                    .disabled(isCheckingModelHealth)
+                }
+
+                if let message = modelHealthFixMessage {
+                    HStack(spacing: 6) {
+                        Image(systemName: message.contains("失败") ? "xmark.octagon.fill" : "checkmark.circle.fill")
+                            .foregroundStyle(message.contains("失败") ? .red : .green)
+                        Text(message)
+                            .font(.system(size: 12))
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                ForEach(Array(modelHealthResults.enumerated()), id: \.offset) { _, result in
+                    HStack(alignment: .center, spacing: 10) {
+                        Image(systemName: healthIcon(for: result.status))
+                            .foregroundStyle(healthColor(for: result.status))
+                            .frame(width: 20)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(result.model)
+                                .font(.system(size: 13, weight: .medium))
+                            Text("\(result.provider) • \(result.status.displayText)")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if case .unhealthy = result.status, !isCheckingModelHealth, canAutoFixModelHealth(result) {
+                            Button("修复") {
+                                fixModelHealth(result: result)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                if modelHealthResults.isEmpty, !isCheckingModelHealth {
+                    Text("点击“检查可用性”开始测试模型连接。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.top, 4)
+        }
+    }
+
     private func providerConnectionSection(providerIndex: Int) -> some View {
         GroupBox("Provider / API Connection") {
             VStack(alignment: .leading, spacing: 12) {
@@ -568,7 +713,7 @@ struct SettingsView: View {
                     }
 
                     Button("Delete API") {
-                        removeSelectedModelProvider()
+                        showDeleteProviderAlert = true
                     }
                     .foregroundStyle(.red)
                 }
@@ -1009,87 +1154,110 @@ struct SettingsView: View {
     @ViewBuilder
     private var agentDetailPanel: some View {
         if let agent = selectedAgent {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack(alignment: .center, spacing: 10) {
-                            Image(systemName: agent.isActive ? "bolt.circle.fill" : "clock.arrow.circlepath")
-                                .foregroundStyle(agent.isActive ? .green : .secondary)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(agent.title)
-                                    .font(.system(size: 18, weight: .semibold))
-                                Text(agent.id)
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.secondary)
-                                    .textSelection(.enabled)
-                            }
-                            Spacer()
-                            Text(agent.statusText)
-                                .font(.system(size: 11, weight: .semibold))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background((agent.isActive ? Color.green : Color.secondary).opacity(0.12))
-                                .foregroundStyle(agent.isActive ? .green : .secondary)
-                                .clipShape(Capsule())
-                        }
-                        Text("Hermes currently exposes session-level management. Rename, export, delete, transcript, and log actions below are real CLI-backed operations.")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                    }
-
-                    GroupBox("Actions") {
-                        VStack(alignment: .leading, spacing: 10) {
-                            HStack {
-                                TextField("Session title", text: $agentRenameDraft)
-                                    .textFieldStyle(.roundedBorder)
-                                Button("Rename") {
-                                    gatewayStore.renameAgentSession(id: agent.id, title: agentRenameDraft)
-                                }
-                                .disabled(gatewayStore.isBusy || agentRenameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                            }
-                            HStack {
-                                Button("Open Transcript") {
-                                    gatewayStore.openTranscript(for: agent)
-                                }
-                                Button("Open Log Excerpt") {
-                                    gatewayStore.openLogExcerpt(for: agent)
-                                }
-                                Button("Export JSONL") {
-                                    gatewayStore.exportAgentSession(id: agent.id)
-                                }
-                                Button("Delete") {
-                                    showDeleteAgentAlert = true
-                                }
-                                .foregroundStyle(.red)
-                            }
-                            Text("Terminate / restart a single running agent is not exposed by the current Hermes CLI, so this panel does not fake that control.")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.orange)
-                        }
-                        .padding(.top, 4)
-                    }
-
-                    GroupBox("Details") {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
                         VStack(alignment: .leading, spacing: 8) {
-                            detailRow("Source", agent.source)
-                            detailRow("Model", agent.model)
-                            detailRow("Started", agent.startedAtText)
-                            detailRow("Ended", agent.endedAtText)
-                            detailRow("Status", agent.statusText)
-                            detailRow("End Reason", agent.endReason.isEmpty ? "n/a" : agent.endReason)
-                            detailRow("Messages", "\(agent.messageCount)")
-                            detailRow("Tool Calls", "\(agent.toolCallCount)")
-                            detailRow("Input Tokens", "\(agent.inputTokens)")
-                            detailRow("Output Tokens", "\(agent.outputTokens)")
-                            detailRow("Cost", agent.estimatedCostText)
+                            HStack(alignment: .center, spacing: 10) {
+                                Image(systemName: agent.isActive ? "bolt.circle.fill" : "clock.arrow.circlepath")
+                                    .foregroundStyle(agent.isActive ? .green : .secondary)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(agent.title)
+                                        .font(.system(size: 18, weight: .semibold))
+                                    Text(agent.id)
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(.secondary)
+                                        .textSelection(.enabled)
+                                }
+                                Spacer()
+                                Text(agent.statusText)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background((agent.isActive ? Color.green : Color.secondary).opacity(0.12))
+                                    .foregroundStyle(agent.isActive ? .green : .secondary)
+                                    .clipShape(Capsule())
+                            }
                         }
-                        .padding(.top, 4)
+
+                        GroupBox("Actions") {
+                            VStack(alignment: .leading, spacing: 10) {
+                                HStack {
+                                    TextField("Session title", text: $agentRenameDraft)
+                                        .textFieldStyle(.roundedBorder)
+                                    Button("Rename") {
+                                        gatewayStore.renameAgentSession(id: agent.id, title: agentRenameDraft)
+                                    }
+                                    .disabled(gatewayStore.isBusy || agentRenameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                }
+                                HStack {
+                                    Button("Open Transcript") {
+                                        gatewayStore.openTranscript(for: agent)
+                                    }
+                                    Button("Open Log Excerpt") {
+                                        gatewayStore.openLogExcerpt(for: agent)
+                                    }
+                                    Button("Export JSONL") {
+                                        gatewayStore.exportAgentSession(id: agent.id)
+                                    }
+                                    Button("Delete") {
+                                        showDeleteAgentAlert = true
+                                    }
+                                    .foregroundStyle(.red)
+                                }
+                            }
+                            .padding(.top, 4)
+                        }
+
+                        GroupBox("Conversation") {
+                            VStack(alignment: .leading, spacing: 12) {
+                                if isLoadingTranscript {
+                                    ProgressView()
+                                        .padding(.vertical, 20)
+                                        .frame(maxWidth: .infinity, alignment: .center)
+                                } else if let transcript = selectedAgentTranscript {
+                                    if transcript.messages.isEmpty {
+                                        Text("No messages in transcript.")
+                                            .font(.system(size: 12))
+                                            .foregroundStyle(.secondary)
+                                    } else {
+                                        LazyVStack(alignment: .leading, spacing: 16) {
+                                            ForEach(transcript.messages) { message in
+                                                transcriptMessageRow(message)
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    Text("Transcript not available.")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .padding(.top, 4)
+                        }
+
+                        GroupBox("Details") {
+                            VStack(alignment: .leading, spacing: 8) {
+                                detailRow("Source", agent.source)
+                                detailRow("Model", agent.model)
+                                detailRow("Started", agent.startedAtText)
+                                detailRow("Ended", agent.endedAtText)
+                                detailRow("Status", agent.statusText)
+                                detailRow("End Reason", agent.endReason.isEmpty ? "n/a" : agent.endReason)
+                                detailRow("Messages", "\(agent.messageCount)")
+                                detailRow("Tool Calls", "\(agent.toolCallCount)")
+                                detailRow("Input Tokens", "\(agent.inputTokens)")
+                                detailRow("Output Tokens", "\(agent.outputTokens)")
+                                detailRow("Cost", agent.estimatedCostText)
+                            }
+                            .padding(.top, 4)
+                        }
                     }
+                    .padding(20)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
-                .padding(20)
-                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .background(Color(nsColor: .windowBackgroundColor))
             }
-            .background(Color(nsColor: .windowBackgroundColor))
         } else {
             VStack(alignment: .leading, spacing: 8) {
                 Text("No agent selected")
@@ -1099,6 +1267,134 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        }
+    }
+
+    private func loadTranscript(for agent: AgentSessionRow) {
+        isLoadingTranscript = true
+        selectedAgentTranscript = nil
+        Task(priority: .userInitiated) {
+            let transcript = SessionTranscriptLoader.load(from: agent.transcriptURL)
+            await MainActor.run {
+                self.selectedAgentTranscript = transcript
+                self.isLoadingTranscript = false
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func transcriptMessageRow(_ message: TranscriptMessage) -> some View {
+        switch message.role {
+        case "user":
+            HStack {
+                Spacer(minLength: 40)
+                VStack(alignment: .trailing, spacing: 4) {
+                    Text(message.content ?? "")
+                        .font(.system(size: 13))
+                        .textSelection(.enabled)
+                }
+                .padding(10)
+                .background(Color.accentColor.opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .frame(maxWidth: 480, alignment: .trailing)
+            }
+        case "assistant":
+            HStack {
+                VStack(alignment: .leading, spacing: 8) {
+                    if let reasoning = message.reasoning, !reasoning.isEmpty {
+                        HStack(alignment: .top, spacing: 6) {
+                            Image(systemName: "lightbulb.fill")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.orange)
+                            Text(reasoning)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                                .lineLimit(4)
+                        }
+                        .padding(8)
+                        .background(Color.orange.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+
+                    if let toolCalls = message.toolCalls, !toolCalls.isEmpty {
+                        ForEach(toolCalls) { toolCall in
+                            HStack(alignment: .top, spacing: 6) {
+                                Image(systemName: "hammer.fill")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.blue)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(toolCall.function?.name ?? "Tool Call")
+                                        .font(.system(size: 11, weight: .semibold))
+                                    if let args = toolCall.function?.arguments, !args.isEmpty {
+                                        Text(args)
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(3)
+                                    }
+                                }
+                            }
+                            .padding(8)
+                            .background(Color.blue.opacity(0.08))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                    }
+
+                    if let content = message.content, !content.isEmpty {
+                        Text(content)
+                            .font(.system(size: 13))
+                            .textSelection(.enabled)
+                    }
+                }
+                .padding(10)
+                .background(Color.secondary.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .frame(maxWidth: 560, alignment: .leading)
+                Spacer(minLength: 40)
+            }
+        case "tool":
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "wrench.and.screwdriver")
+                            .font(.system(size: 10))
+                        Text("Tool Result")
+                            .font(.system(size: 10, weight: .semibold))
+                        if let toolCallId = message.toolCallId, !toolCallId.isEmpty {
+                            Text(toolCallId)
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                    .foregroundStyle(.secondary)
+                    Text(message.content ?? "")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .lineLimit(6)
+                }
+                .padding(8)
+                .background(Color.gray.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .frame(maxWidth: 520, alignment: .leading)
+                Spacer(minLength: 40)
+            }
+        default:
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(message.role.capitalized)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text(message.content ?? "")
+                        .font(.system(size: 12))
+                        .textSelection(.enabled)
+                }
+                .padding(8)
+                .background(Color.secondary.opacity(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                Spacer(minLength: 40)
+            }
         }
     }
 
@@ -1122,6 +1418,854 @@ struct SettingsView: View {
         .frame(width: 320)
     }
 
+    // MARK: - Platforms
+
+    private var platformsTab: some View {
+        HStack(spacing: 0) {
+            platformSidebar
+            Divider()
+            platformDetailPanel
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .sheet(isPresented: $showAddPlatformWizard) {
+            addPlatformWizardSheet
+        }
+    }
+
+    private var platformSidebar: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            List(selection: $selectedPlatformInstanceID) {
+                Section("Platforms") {
+                    ForEach(platformInstancesCache) { instance in
+                        platformSidebarRow(instance)
+                            .tag(instance.id)
+                    }
+                }
+            }
+            .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
+
+            HStack {
+                Button("Add Platform") {
+                    openAddPlatformWizard()
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 12)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Add a messaging platform and configure its required tokens/keys.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Text("Changes are written via `hermes config set` into the current profile's Hermes config files.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(12)
+        }
+        .frame(minWidth: 280, idealWidth: 320, maxWidth: 360, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private func platformSidebarRow(_ instance: PlatformInstance) -> some View {
+        let descriptor = PlatformDescriptorRegistry.descriptor(for: instance.platformID)
+        let runtimeState = gatewayStore.snapshot.runtime?.platforms[instance.platformID]
+        return Button {
+            selectedPlatformInstanceID = instance.id
+            loadPlatformConfigDraft(for: instance)
+        } label: {
+            HStack(alignment: .center, spacing: 10) {
+                Image(systemName: descriptor?.icon ?? "network")
+                    .font(.system(size: 16))
+                    .foregroundStyle(platformColor(runtimeState?.state))
+                    .frame(width: 24)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(instance.displayName)
+                        .font(.system(size: 13, weight: .medium))
+                    Text(platformConnectionLabel(for: instance, runtimeState: runtimeState))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Circle()
+                    .fill(platformColor(runtimeState?.state))
+                    .frame(width: 8, height: 8)
+            }
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private var platformDetailPanel: some View {
+        if let instance = selectedPlatformInstance {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack(alignment: .center, spacing: 10) {
+                        Image(systemName: PlatformDescriptorRegistry.descriptor(for: instance.platformID)?.icon ?? "network")
+                            .font(.system(size: 28))
+                            .foregroundStyle(Color.accentColor)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(instance.displayName)
+                                .font(.system(size: 18, weight: .semibold))
+                            Text(instance.platformID)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                        Spacer()
+                    }
+
+                    GroupBox("Configuration") {
+                        VStack(alignment: .leading, spacing: 12) {
+                            if let descriptor = PlatformDescriptorRegistry.descriptor(for: instance.platformID) {
+                                ForEach(descriptor.fields) { field in
+                                    platformConfigFieldRow(field)
+                                }
+                            }
+
+                            HStack {
+                                Button("Save Config") {
+                                    savePlatformConfig()
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(isSavingPlatforms)
+
+                                Button("Delete Platform") {
+                                    deletePlatformConfig()
+                                }
+                                .foregroundStyle(.red)
+                            }
+
+                            if isSavingPlatforms {
+                                ProgressView()
+                                    .scaleEffect(0.8)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+
+                            if let platformStatusMessage {
+                                platformStatusBanner(platformStatusMessage)
+                            }
+                        }
+                        .padding(.top, 4)
+                    }
+
+                    if let runtime = gatewayStore.snapshot.runtime?.platforms[instance.platformID] {
+                        GroupBox("Runtime Status") {
+                            platformRuntimeRow(key: instance.platformID, state: runtime)
+                                .padding(.top, 4)
+                        }
+                    }
+
+                    GroupBox("Diagnostics") {
+                        platformDiagnosticsSection(for: instance)
+                            .padding(.top, 4)
+                    }
+                }
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            .background(Color(nsColor: .windowBackgroundColor))
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("No platform selected")
+                    .font(.system(size: 18, weight: .semibold))
+                Text("Pick a platform from the left to edit its settings, or add a new one.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        }
+    }
+
+    private func platformConfigFieldRow(_ field: PlatformConfigField) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(field.label)
+                .font(.system(size: 12, weight: .medium))
+            if field.isSecret {
+                SecureField(field.label, text: platformConfigBinding(for: field.key))
+                    .textFieldStyle(.roundedBorder)
+            } else {
+                TextField(field.label, text: platformConfigBinding(for: field.key))
+                    .textFieldStyle(.roundedBorder)
+            }
+            if !field.helpText.isEmpty {
+                Text(field.helpText)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var addPlatformWizardSheet: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack {
+                        Text("Add Platform")
+                            .font(.system(size: 18, weight: .semibold))
+                        Spacer()
+                    }
+
+                    Picker("Platform", selection: $newPlatformPresetID) {
+                        Text("Select a platform...").tag("")
+                        ForEach(PlatformDescriptorRegistry.allPlatforms) { platform in
+                            Text(platform.displayName).tag(platform.id)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .onChange(of: newPlatformPresetID) { _, newValue in
+                        applyPlatformPreset(newValue)
+                    }
+
+                    if let descriptor = PlatformDescriptorRegistry.descriptor(for: newPlatformPresetID) {
+                        GroupBox("Setup Instructions") {
+                            VStack(alignment: .leading, spacing: 6) {
+                                ForEach(descriptor.setupInstructions, id: \.self) { line in
+                                    Text(line)
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .padding(.top, 4)
+                        }
+
+                        GroupBox("Configuration") {
+                            VStack(alignment: .leading, spacing: 12) {
+                                ForEach(descriptor.fields) { field in
+                                    platformWizardFieldRow(field)
+                                }
+                            }
+                            .padding(.top, 4)
+                        }
+                    }
+                }
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Button("Cancel") {
+                        showAddPlatformWizard = false
+                        platformStatusMessage = nil
+                    }
+                    Spacer()
+                    Button("Add") {
+                        commitNewPlatform()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(newPlatformPresetID.isEmpty || isSavingPlatforms)
+                }
+
+                if let platformStatusMessage {
+                    platformStatusBanner(platformStatusMessage)
+                }
+            }
+            .padding(20)
+            .background(Color(nsColor: .controlBackgroundColor))
+        }
+        .frame(minWidth: 560, idealWidth: 640, minHeight: 480, idealHeight: 600)
+    }
+
+    private func platformStatusBanner(_ message: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: message.hasPrefix("Failed") ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                .foregroundStyle(message.hasPrefix("Failed") ? Color.red : Color.accentColor)
+            Text(message)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .background((message.hasPrefix("Failed") ? Color.red : Color.accentColor).opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    @ViewBuilder
+    private func platformDiagnosticsSection(for instance: PlatformInstance) -> some View {
+        let runtimeState = gatewayStore.snapshot.runtime?.platforms[instance.platformID]
+        let hints = platformDiagnosticHints(for: instance, runtimeState: runtimeState, logLines: platformDiagnosticLines)
+        let activeSessions = gatewayStore.snapshot.runtime?.activeSessions?[instance.platformID] ?? []
+        let modelOverrides = gatewayStore.snapshot.runtime?.modelOverrides?[instance.platformID] ?? []
+
+        VStack(alignment: .leading, spacing: 12) {
+            if let platformDiagnosticSummary {
+                platformDiagnosticBanner(platformDiagnosticSummary, isWarning: !instance.isEnabled || runtimeState == nil || runtimeState?.state != "connected")
+            }
+
+            HStack {
+                Button("Restart Gateway") {
+                    gatewayStore.restartService()
+                }
+                .buttonStyle(.bordered)
+
+                Button("Open gateway.log") {
+                    gatewayStore.openGatewayLog()
+                }
+
+                Button("Open error.log") {
+                    gatewayStore.openGatewayErrorLog()
+                }
+            }
+
+            if !activeSessions.isEmpty || !modelOverrides.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Active Sessions & Bindings")
+                        .font(.system(size: 12, weight: .medium))
+
+                    ForEach(activeSessions, id: \.sessionKey) { session in
+                        HStack(alignment: .top, spacing: 6) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(session.sessionKey ?? "unknown")
+                                    .font(.system(size: 10, design: .monospaced))
+                                if let model = session.model, !model.isEmpty {
+                                    Text("model: \(model)")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            Spacer()
+                            Menu {
+                                Button("Reset Session") {
+                                    if let sk = session.sessionKey {
+                                        gatewayStore.submitPendingAction(type: "reset_session", sessionKey: sk)
+                                    }
+                                }
+                                Button("Clear Model Binding") {
+                                    if let sk = session.sessionKey {
+                                        gatewayStore.submitPendingAction(type: "clear_model_override", sessionKey: sk)
+                                    }
+                                }
+                                Button("Evict Cached Agent") {
+                                    if let sk = session.sessionKey {
+                                        gatewayStore.submitPendingAction(type: "evict_agent", sessionKey: sk)
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "ellipsis.circle")
+                                    .font(.system(size: 12))
+                            }
+                            .menuStyle(.borderlessButton)
+                            .frame(width: 24)
+                        }
+                        .padding(8)
+                        .background(Color.secondary.opacity(0.06))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+
+                    ForEach(modelOverrides, id: \.sessionKey) { override in
+                        HStack(alignment: .top, spacing: 6) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(override.sessionKey ?? "unknown")
+                                    .font(.system(size: 10, design: .monospaced))
+                                if let model = override.overrideModel, !model.isEmpty {
+                                    Text("override: \(model)")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(.orange)
+                                }
+                            }
+                            Spacer()
+                            Button {
+                                if let sk = override.sessionKey {
+                                    gatewayStore.submitPendingAction(type: "clear_model_override", sessionKey: sk)
+                                }
+                            } label: {
+                                Text("Clear")
+                                    .font(.system(size: 10))
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 2)
+                            .background(Color.accentColor.opacity(0.1))
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                        }
+                        .padding(8)
+                        .background(Color.orange.opacity(0.06))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                }
+            }
+
+            if !hints.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Suggested next steps")
+                        .font(.system(size: 12, weight: .medium))
+
+                    ForEach(Array(hints.enumerated()), id: \.offset) { _, hint in
+                        HStack(alignment: .top, spacing: 6) {
+                            Text("•")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                            Text(hint)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Recent matching log lines")
+                    .font(.system(size: 12, weight: .medium))
+
+                if platformDiagnosticLines.isEmpty {
+                    Text("No recent matching log lines found for this platform.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(Array(platformDiagnosticLines.enumerated()), id: \.offset) { _, line in
+                        Text(line)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 2)
+                    }
+                }
+            }
+        }
+    }
+
+    private func platformDiagnosticBanner(_ message: String, isWarning: Bool) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: isWarning ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                .foregroundStyle(isWarning ? Color.orange : Color.accentColor)
+            Text(message)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .background((isWarning ? Color.orange : Color.accentColor).opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func platformDiagnosticHints(
+        for instance: PlatformInstance,
+        runtimeState: RuntimePlatformState?,
+        logLines: [String]
+    ) -> [String] {
+        let combinedContext = ([platformDiagnosticSummary ?? ""] + logLines).joined(separator: "\n").lowercased()
+        var hints: [String] = []
+
+        if !instance.isEnabled {
+            hints.append("Fill every required field and save config before expecting the gateway to load this platform.")
+            return hints
+        }
+
+        if runtimeState == nil {
+            hints.append("The running gateway has not loaded this platform yet. Restart gateway after saving config so the adapter is created on startup.")
+        }
+
+        switch instance.platformID {
+        case "email":
+            if combinedContext.contains("state auth") && combinedContext.contains("selected") {
+                hints.append("IMAP login likely succeeded, but the adapter failed before selecting INBOX. This usually points to mailbox-selection compatibility, not a missing EMAIL_* field.")
+                hints.append("Collect the gateway.log excerpt and patch Hermes email adapter to validate the result of `select(\"INBOX\")` before running SEARCH.")
+            }
+
+            if let imapHost = instance.configs["EMAIL_IMAP_HOST"]?.lowercased(), imapHost.contains("163.com") {
+                hints.append("163 Mail typically uses IMAP SSL on port 993. If SMTP later fails, try setting `EMAIL_SMTP_PORT` to 465 (SSL) or 587 (STARTTLS) in Hermes config.")
+            }
+
+            if combinedContext.contains("email_address, email_password") {
+                hints.append("Gateway still thinks required EMAIL_* values are missing. Re-save the platform config and restart gateway so runtime picks up the latest values.")
+            }
+        case "weixin":
+            if combinedContext.contains("server disconnected") {
+                hints.append("Server disconnected usually means an upstream or network interruption. If it keeps repeating, check network stability and the provider service health.")
+            }
+        case "feishu":
+            if combinedContext.contains("no close frame received or sent") {
+                hints.append("This websocket closed abnormally. Hermes usually reconnects automatically, but repeated failures point to network instability or the upstream websocket service.")
+            }
+        default:
+            break
+        }
+
+        if runtimeState?.state == "disconnected" && runtimeState?.errorMessage == nil && logLines.isEmpty {
+            hints.append("No recent matching error lines were found. Reproduce once, then reopen this panel or open gateway.log for the full trace.")
+        }
+
+        return Array(NSOrderedSet(array: hints)) as? [String] ?? hints
+    }
+
+    private func platformWizardFieldRow(_ field: PlatformConfigField) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(field.label)
+                .font(.system(size: 12, weight: .medium))
+            if field.isSecret {
+                SecureField(field.label, text: newPlatformConfigBinding(for: field.key))
+                    .textFieldStyle(.roundedBorder)
+            } else {
+                TextField(field.label, text: newPlatformConfigBinding(for: field.key))
+                    .textFieldStyle(.roundedBorder)
+            }
+            if !field.helpText.isEmpty {
+                Text(field.helpText)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func platformRuntimeRow(key: String, state: RuntimePlatformState?) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .center, spacing: 4) {
+                Image(systemName: platformIcon(key))
+                    .font(.system(size: 24))
+                    .foregroundStyle(platformColor(state?.state))
+                Circle()
+                    .fill(platformColor(state?.state))
+                    .frame(width: 8, height: 8)
+            }
+            .frame(width: 40)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(key.capitalized)
+                    .font(.system(size: 14, weight: .semibold))
+
+                HStack(spacing: 6) {
+                    Text(state?.state ?? "unknown")
+                        .font(.system(size: 11, weight: .medium))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(platformColor(state?.state).opacity(0.12))
+                        .foregroundStyle(platformColor(state?.state))
+                        .clipShape(Capsule())
+
+                    if let errorCode = state?.errorCode, !errorCode.isEmpty {
+                        Text(errorCode)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.red)
+                    }
+                }
+
+                if let errorMessage = state?.errorMessage, !errorMessage.isEmpty {
+                    Text(errorMessage)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
+                }
+
+                if let updatedAt = state?.updatedAt, !updatedAt.isEmpty {
+                    Text("Updated: \(updatedAt)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Spacer()
+        }
+        .padding(.vertical, 10)
+    }
+
+    private func platformIcon(_ key: String) -> String {
+        switch key.lowercased() {
+        case "telegram": return "paperplane.fill"
+        case "discord": return "bubble.left.and.bubble.right.fill"
+        case "slack": return "number"
+        case "whatsapp": return "phone.fill"
+        case "signal": return "wave.3.forward"
+        case "matrix": return "grid"
+        case "mattermost": return "message.fill"
+        case "email", "mail": return "envelope.fill"
+        case "sms": return "message.circle.fill"
+        case "dingtalk": return "bell.fill"
+        case "feishu", "lark": return "paperplane.circle.fill"
+        case "wecom": return "building.2.fill"
+        case "bluebubbles": return "bubble.fill"
+        case "homeassistant", "home_assistant": return "house.fill"
+        case "cli": return "terminal.fill"
+        default: return "network"
+        }
+    }
+
+    private func platformConnectionLabel(for instance: PlatformInstance, runtimeState: RuntimePlatformState?) -> String {
+        if let state = runtimeState?.state, !state.isEmpty {
+            return state
+        }
+        return instance.isEnabled ? "not connected" : "configuration incomplete"
+    }
+
+    private func resolvePlatformInstances() -> [PlatformInstance] {
+        let paths = HermesPaths(settings: settingsStore.settings)
+        let envValues = HermesProfileStore.parseEnvValues(from: paths.envURL)
+        let configValues = HermesProfileStore.parseConfigValues(from: paths.configURL)
+        let discovered = PlatformDescriptorRegistry.discoverInstances(envValues: envValues, configValues: configValues)
+
+        var byID = Dictionary(uniqueKeysWithValues: discovered.map { ($0.id, $0) })
+
+        for (platformID, overrideConfigs) in platformDraftOverrides {
+            guard let descriptor = PlatformDescriptorRegistry.descriptor(for: platformID) else { continue }
+            let baseConfigs = byID[platformID]?.configs ?? [:]
+            let mergedConfigs = mergedPlatformConfigs(for: platformID, base: baseConfigs.merging(overrideConfigs) { _, new in new })
+            let isEnabled = byID[platformID]?.isEnabled ?? mergedConfigs.values.contains {
+                !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+            byID[platformID] = PlatformInstance(
+                id: platformID,
+                platformID: platformID,
+                displayName: descriptor.displayName,
+                isEnabled: isEnabled,
+                configs: mergedConfigs
+            )
+        }
+
+        let order = Dictionary(uniqueKeysWithValues: PlatformDescriptorRegistry.allPlatforms.enumerated().map { ($1.id, $0) })
+        return byID.values.sorted {
+            (order[$0.platformID] ?? .max) < (order[$1.platformID] ?? .max)
+        }
+    }
+
+    private func refreshPlatformInstances() {
+        platformInstancesCache = resolvePlatformInstances()
+    }
+
+    private func refreshPlatformDiagnostics() {
+        guard let instance = selectedPlatformInstance else {
+            platformDiagnosticSummary = nil
+            platformDiagnosticLines = []
+            return
+        }
+
+        let runtimeState = gatewayStore.snapshot.runtime?.platforms[instance.platformID]
+        let paths = HermesPaths(settings: settingsStore.settings)
+        let platformID = instance.platformID
+        let summary = platformDiagnosticSummaryText(for: instance, runtimeState: runtimeState)
+
+        Task(priority: .utility) {
+            let lines = Self.loadPlatformDiagnosticLines(platformID: platformID, paths: paths)
+            await MainActor.run {
+                guard selectedPlatformInstanceID == platformID else { return }
+                platformDiagnosticSummary = summary
+                platformDiagnosticLines = lines
+            }
+        }
+    }
+
+    private func platformDiagnosticSummaryText(for instance: PlatformInstance, runtimeState: RuntimePlatformState?) -> String {
+        if !instance.isEnabled {
+            return "Configuration incomplete. Fill all required fields before the gateway can load this platform."
+        }
+        guard gatewayStore.snapshot.serviceLoaded else {
+            return "Gateway service is not running. Start or restart it after saving platform config."
+        }
+        guard let runtimeState else {
+            return "This platform is configured, but the running gateway has not loaded it into runtime yet. Restart gateway and check the logs below."
+        }
+        if let errorMessage = runtimeState.errorMessage, !errorMessage.isEmpty {
+            return errorMessage
+        }
+        switch runtimeState.state {
+        case "connected":
+            return "Platform is connected."
+        case "connecting":
+            return "Platform is connecting."
+        case "disconnected":
+            return "Gateway loaded the platform, but it is disconnected. Check the logs below for the last adapter error."
+        default:
+            return "Platform runtime state is unknown. Check the logs below."
+        }
+    }
+
+    private static func loadPlatformDiagnosticLines(platformID: String, paths: HermesPaths) -> [String] {
+        let files = [
+            ("gateway.log", paths.logsDir.appending(path: "gateway.log")),
+            ("gateway.error.log", paths.logsDir.appending(path: "gateway.error.log")),
+            ("errors.log", paths.logsDir.appending(path: "errors.log")),
+        ]
+
+        let keywords = platformDiagnosticKeywords(for: platformID)
+        var matches: [String] = []
+
+        for (name, url) in files where FileManager.default.fileExists(atPath: url.path) {
+            guard let content = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            let lines = content
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .suffix(400)
+                .map(String.init)
+                .filter { line in
+                    keywords.contains { keyword in
+                        line.localizedCaseInsensitiveContains(keyword)
+                    }
+                }
+                .suffix(6)
+
+            matches.append(contentsOf: lines.map { "[\(name)] \($0)" })
+        }
+
+        return Array(matches.suffix(8))
+    }
+
+    private static func platformDiagnosticKeywords(for platformID: String) -> [String] {
+        switch platformID {
+        case "email":
+            return ["[Email]", "Email:", "EMAIL_", "imap", "smtp"]
+        case "feishu":
+            return ["[Lark]", "[Feishu]", "Feishu", "Lark"]
+        case "weixin":
+            return ["weixin", "wechat", "[Weixin]"]
+        case "wecom":
+            return ["wecom", "WeCom"]
+        case "matrix":
+            return ["matrix", "[Matrix]"]
+        default:
+            return [platformID, platformID.replacingOccurrences(of: "_", with: " ")]
+        }
+    }
+
+    private var selectedPlatformInstance: PlatformInstance? {
+        platformInstancesCache.first { $0.id == selectedPlatformInstanceID }
+    }
+
+    private func loadPlatformConfigDraft(for instance: PlatformInstance) {
+        platformConfigDrafts = mergedPlatformConfigs(for: instance.platformID, base: instance.configs)
+        platformStatusMessage = nil
+    }
+
+    private func mergedPlatformConfigs(for platformID: String, base: [String: String]) -> [String: String] {
+        var merged = base
+        if let overrides = platformDraftOverrides[platformID] {
+            merged.merge(overrides) { _, new in new }
+        }
+        return merged
+    }
+
+    private func platformConfigBinding(for key: String) -> Binding<String> {
+        Binding(
+            get: { platformConfigDrafts[key] ?? "" },
+            set: { platformConfigDrafts[key] = $0 }
+        )
+    }
+
+    private func newPlatformConfigBinding(for key: String) -> Binding<String> {
+        Binding(
+            get: { newPlatformConfigDrafts[key] ?? "" },
+            set: { newPlatformConfigDrafts[key] = $0 }
+        )
+    }
+
+    private func applyPlatformPreset(_ id: String) {
+        guard let descriptor = PlatformDescriptorRegistry.descriptor(for: id) else { return }
+        var drafts: [String: String] = [:]
+        for field in descriptor.fields {
+            drafts[field.key] = field.defaultValue ?? ""
+        }
+        newPlatformConfigDrafts = drafts
+        platformStatusMessage = nil
+    }
+
+    private func openAddPlatformWizard() {
+        newPlatformPresetID = ""
+        newPlatformConfigDrafts = [:]
+        platformStatusMessage = nil
+        showAddPlatformWizard = true
+    }
+
+    private func savePlatformConfig() {
+        guard selectedPlatformInstance != nil else { return }
+        isSavingPlatforms = true
+        Task {
+            let result = await runPlatformConfigCommands(platformConfigDrafts.sorted { $0.key < $1.key })
+            await MainActor.run {
+                isSavingPlatforms = false
+                switch result {
+                case .success:
+                    platformStatusMessage = "Platform config saved to the current Hermes profile."
+                    if let instance = selectedPlatformInstance {
+                        platformDraftOverrides[instance.platformID] = platformConfigDrafts
+                    }
+                    refreshPlatformInstances()
+                    profileStore.load()
+                    gatewayStore.refresh()
+                case .failure(let error):
+                    platformStatusMessage = "Failed to save platform config: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func deletePlatformConfig() {
+        guard let instance = selectedPlatformInstance,
+              let descriptor = PlatformDescriptorRegistry.descriptor(for: instance.platformID) else { return }
+        isSavingPlatforms = true
+        Task {
+            let updates = descriptor.fields.map { ($0.key, "") }
+            let result = await runPlatformConfigCommands(updates)
+            await MainActor.run {
+                isSavingPlatforms = false
+                switch result {
+                case .success:
+                    platformStatusMessage = "Platform removed from the current Hermes profile."
+                    platformDraftOverrides.removeValue(forKey: instance.platformID)
+                    refreshPlatformInstances()
+                    selectedPlatformInstanceID = nil
+                    platformConfigDrafts = [:]
+                    profileStore.load()
+                    gatewayStore.refresh()
+                case .failure(let error):
+                    platformStatusMessage = "Failed to delete platform: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func commitNewPlatform() {
+        guard !newPlatformPresetID.isEmpty,
+              let descriptor = PlatformDescriptorRegistry.descriptor(for: newPlatformPresetID) else { return }
+        isSavingPlatforms = true
+        Task {
+            let updates = descriptor.fields.map { field in
+                (field.key, newPlatformConfigDrafts[field.key] ?? field.defaultValue ?? "")
+            }
+            let result = await runPlatformConfigCommands(updates)
+            await MainActor.run {
+                isSavingPlatforms = false
+                switch result {
+                case .success:
+                    platformStatusMessage = "Platform added to the current Hermes profile."
+                    platformDraftOverrides[newPlatformPresetID] = Dictionary(uniqueKeysWithValues: updates.map { ($0.0, $0.1) })
+                    refreshPlatformInstances()
+                    showAddPlatformWizard = false
+                    profileStore.load()
+                    gatewayStore.refresh()
+                    selectedPlatformInstanceID = newPlatformPresetID
+                    if let instance = platformInstancesCache.first(where: { $0.id == newPlatformPresetID }) {
+                        loadPlatformConfigDraft(for: instance)
+                    }
+                case .failure(let error):
+                    platformStatusMessage = "Failed to add platform: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func runPlatformConfigCommands(_ updates: [(key: String, value: String)]) async -> Result<Void, Error> {
+        do {
+            for (key, value) in updates {
+                let result = try await CommandRunner.runHermes(settingsStore.settings, ["config", "set", key, value])
+                guard result.status == 0 else {
+                    let message = result.combinedOutput.isEmpty
+                        ? "Command failed: hermes config set \(key)"
+                        : result.combinedOutput
+                    throw NSError(domain: "HermesStation.Platforms", code: Int(result.status), userInfo: [NSLocalizedDescriptionKey: message])
+                }
+            }
+            return .success(())
+        } catch {
+            return .failure(error)
+        }
+    }
+
     // MARK: - Environment
 
     private var environmentTab: some View {
@@ -1129,6 +2273,7 @@ struct SettingsView: View {
             Section("配置文件") {
                 pathRow("config.yaml", path: profileStore.snapshot.configURL.path, action: profileStore.openConfigFile)
                 pathRow(".env", path: profileStore.snapshot.envURL.path, action: profileStore.openEnvFile)
+                pathRow("SOUL.md", path: profileStore.snapshot.soulURL.path, action: profileStore.openSoulFile)
             }
 
             Section("Utilities") {
@@ -1193,6 +2338,204 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    private var profileMeaningOverview: some View {
+        GroupBox("What This Profile Means") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "square.stack.3d.up.fill")
+                        .foregroundStyle(Color.accentColor)
+                    Text("在 Hermes 里，profile 是一套命名的隔离环境。切换 profile，会把配置、密钥、SOUL、sessions、logs、gateway 状态，以及 CLI 的 `-p` 作用域一起切走。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                profileMeaningRow(
+                    systemImage: "terminal.fill",
+                    title: "CLI / Gateway Scope",
+                    body: "这个 profile 会成为 Hermes 命令和 menubar Gateway 控制的默认目标。",
+                    emphasis: "hermes -p \(profileIDPreview)"
+                )
+                profileMeaningRow(
+                    systemImage: "gearshape.2.fill",
+                    title: "Config & Secrets",
+                    body: "会读取这一套 profile 自己的 `config.yaml` 和 `.env`，因此 provider、token、platform 配置彼此隔离。",
+                    emphasis: profileDerivedPath(\.configURL)
+                )
+                profileMeaningRow(
+                    systemImage: "person.crop.square.fill",
+                    title: "Identity & Context",
+                    body: "这个 profile 自己拥有 `SOUL.md`，也拥有 profile home 里的其余上下文资产。",
+                    emphasis: profileDerivedPath(\.soulURL)
+                )
+                profileMeaningRow(
+                    systemImage: "clock.arrow.circlepath",
+                    title: "Runtime & History",
+                    body: "sessions、logs、state.db 和 gateway_state 都属于这套环境，所以不同 profile 的历史与运行态不会混在一起。",
+                    emphasis: profileDerivedPath(\.sessionsDir)
+                )
+            }
+            .padding(.top, 4)
+        }
+    }
+
+    private var activeProfileScopeBanner: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "scope")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Current isolated runtime: \(profileSwitcherLabel(for: settingsStore.settings))")
+                    .font(.system(size: 11, weight: .medium))
+                Text("Owns its own config.yaml, .env, SOUL.md, sessions, logs, and gateway state.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+        }
+        .padding(10)
+        .background(Color.accentColor.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var profileScopePreview: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            profileScopeRow(
+                systemImage: "folder.fill",
+                title: "Hermes Home",
+                value: profileDerivedPath(\.hermesHome),
+                detail: "这套 profile 的根目录。"
+            )
+            profileScopeRow(
+                systemImage: "doc.text.fill",
+                title: "config.yaml",
+                value: profileDerivedPath(\.configURL),
+                detail: "模型、路由和运行配置从这里读取。"
+            )
+            profileScopeRow(
+                systemImage: "key.fill",
+                title: ".env",
+                value: profileDerivedPath(\.envURL),
+                detail: "密钥、token 和环境变量属于这套 profile。"
+            )
+            profileScopeRow(
+                systemImage: "person.text.rectangle.fill",
+                title: "SOUL.md",
+                value: profileDerivedPath(\.soulURL),
+                detail: "定义这套 profile 的人格 / 语气 / 工作方式。"
+            )
+            profileScopeRow(
+                systemImage: "tray.full.fill",
+                title: "sessions / logs / state.db",
+                value: profileDerivedRuntimePreview,
+                detail: "会话历史、日志和运行状态会按 profile 分开。"
+            )
+            profileScopeRow(
+                systemImage: "bolt.horizontal.circle.fill",
+                title: "Gateway Service Label",
+                value: profileLaunchAgentPreview,
+                detail: "launchd 会按 profile 名字分隔服务实例。"
+            )
+            profileScopeRow(
+                systemImage: "terminal",
+                title: "Command Scope",
+                value: "hermes -p \(profileIDPreview)",
+                detail: "Hermes CLI 用这个 profile ID 切换到对应环境。"
+            )
+        }
+    }
+
+    private func profileMeaningRow(systemImage: String, title: String, body: String, emphasis: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: systemImage)
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: 18)
+                .foregroundStyle(.secondary)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+                Text(body)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(emphasis)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .lineLimit(2)
+            }
+        }
+        .padding(10)
+        .background(Color.secondary.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func profileScopeRow(systemImage: String, title: String, value: String, detail: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: systemImage)
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: 18)
+                .foregroundStyle(.secondary)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+                Text(value)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                Text(detail)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var profileIDPreview: String {
+        let id = appDraft.normalized.profileName
+        return id.isEmpty ? "<unset-profile-id>" : id
+    }
+
+    private func profileSwitcherLabel(for profile: AppSettings) -> String {
+        let displayName = profile.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "Profile"
+            : profile.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let profileID = profile.profileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !profileID.isEmpty else { return "\(displayName) · profile id unset" }
+        return "\(displayName) · -p \(profileID)"
+    }
+
+    private var profilePreviewPaths: HermesPaths? {
+        let settings = appDraft.normalized
+        guard !settings.projectRootPath.isEmpty, !settings.profileName.isEmpty else { return nil }
+        return HermesPaths(settings: settings)
+    }
+
+    private func profileDerivedPath(_ keyPath: KeyPath<HermesPaths, URL>) -> String {
+        guard let paths = profilePreviewPaths else {
+            return "Set Project Root and Hermes Profile ID to preview this path."
+        }
+        return paths[keyPath: keyPath].path
+    }
+
+    private var profileDerivedRuntimePreview: String {
+        guard let paths = profilePreviewPaths else {
+            return "Set Project Root and Hermes Profile ID to preview runtime storage."
+        }
+        return "\(paths.sessionsDir.path) | \(paths.logsDir.path) | \(paths.stateDB.path)"
+    }
+
+    private var profileLaunchAgentPreview: String {
+        guard let paths = profilePreviewPaths else {
+            return "Set Hermes Profile ID to preview the launchd label."
+        }
+        return paths.launchAgentLabel
     }
 
     private func labeledField(_ title: String, text: Binding<String>) -> some View {
@@ -1308,6 +2651,15 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
             Spacer(minLength: 0)
+        }
+    }
+
+    private func platformColor(_ state: String?) -> Color {
+        switch state {
+        case "connected": return .green
+        case "disconnected": return .red
+        case "connecting": return .orange
+        default: return .secondary
         }
     }
 
@@ -1833,7 +3185,7 @@ struct SettingsView: View {
             }
             syncSelectedSavedModel()
 
-        case .current, .routing:
+        case .current, .routing, .health:
             if let selectedModelProviderID, appDraft.modelProviders.contains(where: { $0.id == selectedModelProviderID }) {
                 syncSelectedSavedModel()
             } else {
@@ -1868,6 +3220,7 @@ struct SettingsView: View {
         appDraft.modelProviders.remove(at: providerIndex)
         selectedModelProviderID = appDraft.modelProviders.first?.id
         syncSelectedSavedModel()
+        settingsStore.update(appDraft.normalized)
     }
 
     private func addModelToSelectedProvider() {
@@ -2142,6 +3495,10 @@ struct SettingsView: View {
             issues.append(.init(severity: .error, message: "Base URL 不是合法的 http/https 地址。"))
         }
 
+        if SavedProviderConnection.hasKimiCodingV1Issue(providerID: providerID, baseURL: baseURL) {
+            issues.append(.init(severity: .warning, message: "Kimi Coding endpoint 应为 `https://api.kimi.com/coding/v1`。当前 `.../coding` 会在 Hermes 运行时触发 404；保存时 menubar 会自动修正。"))
+        }
+
         let authType = resolved?.authType ?? .apiKey
 
         if resolved?.id == "custom" {
@@ -2271,7 +3628,10 @@ struct SettingsView: View {
         var normalized = provider
         normalized.displayName = provider.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         normalized.providerID = provider.providerID.trimmingCharacters(in: .whitespacesAndNewlines)
-        normalized.baseURL = provider.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        normalized.baseURL = SavedProviderConnection.normalizedBaseURL(
+            providerID: normalized.providerID,
+            baseURL: provider.baseURL
+        )
         normalized.apiKey = provider.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         if normalized.displayName.isEmpty {
             normalized.displayName = normalized.providerID.isEmpty ? "Provider" : normalized.providerID
@@ -2305,6 +3665,185 @@ struct SettingsView: View {
         selectedAgentID = rows.first?.id
         agentRenameDraft = rows.first?.title ?? ""
     }
+
+    // MARK: - Model Health Helpers
+
+    private var modelHealthSidebarSubtitle: String {
+        let unhealthyCount = modelHealthResults.filter { !$0.status.isHealthy }.count
+        if isCheckingModelHealth { return "检查中..." }
+        if modelHealthResults.isEmpty { return "点击检查" }
+        if unhealthyCount > 0 { return "\(unhealthyCount) 个模型异常" }
+        return "全部正常"
+    }
+
+    private var modelHealthIconName: String {
+        let unhealthyCount = modelHealthResults.filter { !$0.status.isHealthy }.count
+        if isCheckingModelHealth { return "arrow.triangle.2.circlepath" }
+        if modelHealthResults.isEmpty { return "stethoscope" }
+        if unhealthyCount > 0 { return "xmark.octagon.fill" }
+        return "checkmark.shield.fill"
+    }
+
+    private func runModelHealthChecks() {
+        isCheckingModelHealth = true
+        modelHealthFixMessage = nil
+        modelHealthResults = []
+
+        let mainProvider = hermesDraft.provider
+        let mainModel = hermesDraft.modelName
+        let routing = profileStore.snapshot.routing
+
+        Task {
+            var results: [HermesProfileStore.ModelHealthResult] = []
+
+            let mainStatus = await modelHealthStatus(for: mainProvider, model: mainModel)
+            results.append(HermesProfileStore.ModelHealthResult(provider: mainProvider, model: mainModel, status: mainStatus))
+
+            if routing.smartRoutingEnabled, !routing.smartRoutingTargetModel.isEmpty {
+                let cheapProvider = routing.smartRoutingTargetProvider.isEmpty ? mainProvider : routing.smartRoutingTargetProvider
+                let cheapModel = routing.smartRoutingTargetModel
+                let cheapStatus = await modelHealthStatus(for: cheapProvider, model: cheapModel)
+                results.append(HermesProfileStore.ModelHealthResult(provider: cheapProvider, model: cheapModel, status: cheapStatus))
+            }
+
+            await MainActor.run {
+                self.modelHealthResults = results
+                self.isCheckingModelHealth = false
+            }
+        }
+    }
+
+    private func fixModelHealth(result: HermesProfileStore.ModelHealthResult) {
+        modelHealthFixMessage = nil
+        Task {
+            let (success, message, _) = await profileStore.autoFixModel(provider: result.provider, model: result.model)
+            await MainActor.run {
+                self.modelHealthFixMessage = message
+                if success {
+                    self.runModelHealthChecks()
+                }
+            }
+        }
+    }
+
+    private func canAutoFixModelHealth(_ result: HermesProfileStore.ModelHealthResult) -> Bool {
+        let currentProvider = canonicalProviderID(hermesDraft.provider)
+        let resultProvider = canonicalProviderID(result.provider)
+        let currentModel = hermesDraft.modelName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resultModel = result.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        return resultProvider == currentProvider && resultModel == currentModel
+    }
+
+    private func modelHealthStatus(for provider: String, model: String) async -> HermesProfileStore.ModelHealthStatus {
+        let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedModel.isEmpty else { return .noModel }
+
+        guard let target = resolvedModelHealthProbeTarget(provider: provider, model: trimmedModel) else {
+            return .unhealthy("未找到对应的 Provider 配置", nil)
+        }
+        guard !target.baseURL.isEmpty else {
+            return .unhealthy("缺少 Base URL", nil)
+        }
+        guard !target.apiKey.isEmpty else {
+            return .unhealthy("缺少 API Key", nil)
+        }
+
+        return await profileStore.checkModelHealth(
+            provider: target.provider,
+            baseURL: target.baseURL,
+            apiKey: target.apiKey,
+            model: target.model
+        )
+    }
+
+    private func resolvedModelHealthProbeTarget(provider: String, model: String) -> ModelHealthProbeTarget? {
+        let canonicalTargetProvider = canonicalProviderID(provider)
+        let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !canonicalTargetProvider.isEmpty, !trimmedModel.isEmpty else { return nil }
+
+        let currentProvider = canonicalProviderID(hermesDraft.provider)
+        if canonicalTargetProvider == currentProvider {
+            return ModelHealthProbeTarget(
+                provider: provider.trimmingCharacters(in: .whitespacesAndNewlines),
+                model: trimmedModel,
+                baseURL: effectiveHealthBaseURL(
+                    providerID: hermesDraft.provider,
+                    baseURL: hermesDraft.baseURL,
+                    apiKey: hermesDraft.apiKey
+                ),
+                apiKey: hermesDraft.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        }
+
+        let candidates = appDraft.modelProviders.filter { savedProvider in
+            canonicalProviderID(savedProvider.providerID) == canonicalTargetProvider
+        }
+        let exactModelCandidates = candidates.filter { savedProvider in
+            savedProvider.models.contains { savedModel in
+                savedModel.modelName.trimmingCharacters(in: .whitespacesAndNewlines) == trimmedModel
+            }
+        }
+        let chosenProvider = exactModelCandidates.first(where: { isProviderAvailable($0) })
+            ?? exactModelCandidates.first
+            ?? candidates.first(where: { isProviderAvailable($0) })
+            ?? candidates.first
+
+        guard let chosenProvider else { return nil }
+        return ModelHealthProbeTarget(
+            provider: chosenProvider.providerID.trimmingCharacters(in: .whitespacesAndNewlines),
+            model: trimmedModel,
+            baseURL: effectiveHealthBaseURL(
+                providerID: chosenProvider.providerID,
+                baseURL: chosenProvider.baseURL,
+                apiKey: chosenProvider.apiKey
+            ),
+            apiKey: chosenProvider.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
+    private func effectiveHealthBaseURL(providerID: String, baseURL: String, apiKey: String) -> String {
+        let normalizedBaseURL = SavedProviderConnection.normalizedBaseURL(providerID: providerID, baseURL: baseURL)
+        if !normalizedBaseURL.isEmpty {
+            return normalizedBaseURL
+        }
+
+        switch canonicalProviderID(providerID) {
+        case "kimi-coding":
+            let trimmedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedAPIKey.hasPrefix("sk-kimi-") {
+                return "https://api.kimi.com/coding/v1"
+            }
+            return "https://api.moonshot.ai/v1"
+        default:
+            return ""
+        }
+    }
+
+    private func canonicalProviderID(_ providerID: String) -> String {
+        HermesProviderDescriptor.resolve(providerID)?.id
+            ?? providerID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private func healthIcon(for status: HermesProfileStore.ModelHealthStatus) -> String {
+        switch status {
+        case .unknown: return "questionmark.circle"
+        case .checking: return "arrow.triangle.2.circlepath"
+        case .healthy: return "checkmark.circle.fill"
+        case .unhealthy: return "xmark.octagon.fill"
+        case .authError: return "exclamationmark.triangle.fill"
+        case .noModel: return "minus.circle"
+        }
+    }
+
+    private func healthColor(for status: HermesProfileStore.ModelHealthStatus) -> Color {
+        switch status {
+        case .unknown, .checking: return .secondary
+        case .healthy: return .green
+        case .unhealthy: return .red
+        case .authError: return .orange
+        case .noModel: return .gray
+        }
+    }
 }
 
 private extension AppSettings {
@@ -2320,7 +3859,10 @@ private extension AppSettings {
             var normalizedProvider = provider
             normalizedProvider.displayName = provider.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
             normalizedProvider.providerID = provider.providerID.trimmingCharacters(in: .whitespacesAndNewlines)
-            normalizedProvider.baseURL = provider.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            normalizedProvider.baseURL = SavedProviderConnection.normalizedBaseURL(
+                providerID: normalizedProvider.providerID,
+                baseURL: provider.baseURL
+            )
             normalizedProvider.apiKey = provider.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
             if normalizedProvider.displayName.isEmpty {
                 normalizedProvider.displayName = normalizedProvider.providerID.isEmpty ? "Provider" : normalizedProvider.providerID

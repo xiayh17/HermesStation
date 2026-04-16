@@ -173,7 +173,10 @@ final class SettingsStore: ObservableObject {
                     normalizedProvider.displayName = "Provider"
                 }
                 normalizedProvider.providerID = provider.providerID.trimmingCharacters(in: .whitespacesAndNewlines)
-                normalizedProvider.baseURL = provider.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                normalizedProvider.baseURL = SavedProviderConnection.normalizedBaseURL(
+                    providerID: normalizedProvider.providerID,
+                    baseURL: provider.baseURL
+                )
                 normalizedProvider.apiKey = provider.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
                 normalizedProvider.models = provider.models.map { model in
                     var normalizedModel = model
