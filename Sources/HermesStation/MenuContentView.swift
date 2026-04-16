@@ -1,10 +1,12 @@
 import SwiftUI
 import AppKit
+import Charts
 
 struct MenuContentView: View {
     @EnvironmentObject private var store: GatewayStore
     @EnvironmentObject private var settingsStore: SettingsStore
     @EnvironmentObject private var profileStore: HermesProfileStore
+    @State private var hoveredUsageChart = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -43,9 +45,9 @@ struct MenuContentView: View {
                             settingsStore.activateProfile(profile.id)
                         } label: {
                             if profile.id == settingsStore.activeProfileID {
-                                Label(profile.displayName, systemImage: "checkmark")
+                                Label(profileMenuLabel(for: profile), systemImage: "checkmark")
                             } else {
-                                Text(profile.displayName)
+                                Text(profileMenuLabel(for: profile))
                             }
                         }
                     }
@@ -56,6 +58,9 @@ struct MenuContentView: View {
             }
             Text(profileLine)
                 .font(.subheadline)
+            Text(profileScopeLine)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
             Text("Model: \(activeModelLine)")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
@@ -152,10 +157,30 @@ struct MenuContentView: View {
     private var usageSection: some View {
         let usage = store.snapshot.usage
         let last24h = usage.last24Hours
+        let buckets = menuUsageBuckets
 
         return VStack(alignment: .leading, spacing: 8) {
-            Text("Usage")
-                .font(.headline)
+            HStack {
+                Text("Usage")
+                    .font(.headline)
+                Spacer()
+                if !buckets.isEmpty {
+                    Image(systemName: "chart.bar")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .padding(4)
+                        .background(Color.secondary.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .onHover { isHovering in
+                            hoveredUsageChart = isHovering
+                        }
+                        .background(
+                            PopoverChartTrigger(isPresented: $hoveredUsageChart) {
+                                usageChartPopover(buckets: buckets)
+                            }
+                        )
+                }
+            }
             HStack {
                 statusPill("24h Sessions", value: "\(last24h.sessionCount)")
                 statusPill("24h Tokens", value: compactCount(last24h.totalTokens))
@@ -166,6 +191,30 @@ struct MenuContentView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
         }
+    }
+
+    private func usageChartPopover(buckets: [UsageTimeBucket]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Tokens over time")
+                .font(.system(size: 12, weight: .semibold))
+            Chart(buckets) { bucket in
+                BarMark(
+                    x: .value("Time", Date(timeIntervalSince1970: bucket.bucketStart)),
+                    y: .value("Tokens", bucket.totalTokens)
+                )
+                .foregroundStyle(Color.accentColor.gradient)
+            }
+            .chartXAxis {
+                AxisMarks(values: .automatic(desiredCount: 4)) { value in
+                    AxisGridLine()
+                    AxisTick()
+                    AxisValueLabel(format: menuChartDateFormat)
+                }
+            }
+            .chartYAxis(.hidden)
+            .frame(width: 180, height: 90)
+        }
+        .padding(12)
     }
 
     private var footerSection: some View {
@@ -207,10 +256,22 @@ struct MenuContentView: View {
 
     private var profileLine: String {
         let settings = settingsStore.settings
-        if settings.displayName == settings.profileName || settings.displayName.isEmpty {
-            return "Profile: \(settings.profileName)"
-        }
-        return "Profile: \(settings.displayName) (\(settings.profileName))"
+        return "Profile: \(profileMenuLabel(for: settings))"
+    }
+
+    private var profileScopeLine: String {
+        let profileID = settingsStore.settings.profileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !profileID.isEmpty else { return "Isolated Hermes environment · config/.env/SOUL/sessions split by profile" }
+        return "Isolated Hermes environment · config/.env/SOUL/sessions · -p \(profileID)"
+    }
+
+    private func profileMenuLabel(for profile: AppSettings) -> String {
+        let displayName = profile.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "Profile"
+            : profile.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let profileID = profile.profileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !profileID.isEmpty else { return "\(displayName) · profile id unset" }
+        return "\(displayName) · -p \(profileID)"
     }
 
     private var serviceDetailLine: String {
@@ -227,6 +288,27 @@ struct MenuContentView: View {
         case .unknown:
             return "service not installed yet"
         }
+    }
+
+    private var menuUsageBuckets: [UsageTimeBucket] {
+        let usage = store.snapshot.usage
+        if usage.last24HourBuckets.count >= 2 {
+            return usage.last24HourBuckets
+        }
+        if usage.last7DayBuckets.count >= 2 {
+            return usage.last7DayBuckets
+        }
+        return []
+    }
+
+    private var menuChartDateFormat: Date.FormatStyle {
+        let buckets = menuUsageBuckets
+        let isHourly = buckets.count >= 2 &&
+            (buckets[1].bucketStart - buckets[0].bucketStart) < 86400
+        if isHourly {
+            return .dateTime.hour()
+        }
+        return .dateTime.month(.abbreviated).day()
     }
 
     private var topUsageLine: String {

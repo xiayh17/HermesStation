@@ -14,6 +14,26 @@ struct RuntimePlatformState: Decodable {
     }
 }
 
+struct RuntimeSessionInfo: Decodable {
+    let sessionKey: String?
+    let model: String?
+
+    enum CodingKeys: String, CodingKey {
+        case sessionKey = "session_key"
+        case model
+    }
+}
+
+struct RuntimeModelOverrideInfo: Decodable {
+    let sessionKey: String?
+    let overrideModel: String?
+
+    enum CodingKeys: String, CodingKey {
+        case sessionKey = "session_key"
+        case overrideModel = "override_model"
+    }
+}
+
 struct RuntimeStatus: Decodable {
     let gatewayState: String?
     let exitReason: String?
@@ -22,6 +42,8 @@ struct RuntimeStatus: Decodable {
     let updatedAt: String?
     let pid: Int?
     let platforms: [String: RuntimePlatformState]
+    let activeSessions: [String: [RuntimeSessionInfo]]?
+    let modelOverrides: [String: [RuntimeModelOverrideInfo]]?
 
     enum CodingKeys: String, CodingKey {
         case gatewayState = "gateway_state"
@@ -31,6 +53,8 @@ struct RuntimeStatus: Decodable {
         case updatedAt = "updated_at"
         case pid
         case platforms
+        case activeSessions = "active_sessions"
+        case modelOverrides = "model_overrides"
     }
 }
 

@@ -150,6 +150,30 @@ final class GatewayStore: ObservableObject {
         Task { _ = try? await CommandRunner.openPath(paths.hermesHome) }
     }
 
+    func submitPendingAction(type: String, sessionKey: String) {
+        let action: [String: Any] = [
+            "type": type,
+            "session_key": sessionKey,
+        ]
+        let url = paths.gatewayActions
+        do {
+            var existing: [String: Any] = ["actions": []]
+            if FileManager.default.fileExists(atPath: url.path),
+               let data = try? Data(contentsOf: url),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                existing = json
+            }
+            var actions = existing["actions"] as? [[String: Any]] ?? []
+            actions.append(action)
+            existing["actions"] = actions
+            let data = try JSONSerialization.data(withJSONObject: existing, options: [.prettyPrinted])
+            try data.write(to: url, options: .atomic)
+            snapshot.lastCommandOutput = "Submitted \(type) for \(sessionKey). Gateway will process it within ~30s."
+        } catch {
+            snapshot.lastCommandOutput = "Failed to submit action: \(error.localizedDescription)"
+        }
+    }
+
     private func performGatewayAction(_ args: [String]) {
         guard !isBusy else { return }
         isBusy = true

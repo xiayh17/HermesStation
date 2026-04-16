@@ -15,12 +15,28 @@ struct HermesPaths {
         projectRoot.appending(path: ".hermes-home/profiles/\(settings.profileName)", directoryHint: .isDirectory)
     }
 
+    var configURL: URL {
+        hermesHome.appending(path: "config.yaml")
+    }
+
+    var envURL: URL {
+        hermesHome.appending(path: ".env")
+    }
+
+    var soulURL: URL {
+        hermesHome.appending(path: "SOUL.md")
+    }
+
     var launcher: URL {
         URL(fileURLWithPath: settings.launcherPath)
     }
 
     var gatewayState: URL {
         hermesHome.appending(path: "gateway_state.json")
+    }
+
+    var gatewayActions: URL {
+        hermesHome.appending(path: "gateway_actions.json")
     }
 
     var gatewayPID: URL {
