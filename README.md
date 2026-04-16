@@ -1,48 +1,75 @@
 # Hermes Station Menu Bar
 
-Native macOS menu bar app for monitoring and operating Hermes gateway profiles.
+A native macOS menu bar app for monitoring and operating [Hermes](https://github.com/xiayh17/hermes) gateway profiles.
 
-## Current scope
+[![macOS](https://img.shields.io/badge/macOS-14.0+-333333?logo=apple)](https://www.apple.com/macos/)
+[![Swift](https://img.shields.io/badge/Swift-6.2-F05138?logo=swift)](https://swift.org)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-- Supports multiple local Hermes profiles, with one active profile at a time
-- Reads gateway runtime status from the active profile's Hermes home, for example:
-  - `/Users/xiayh/Projects/install_hermers/.hermes-home/profiles/yong/gateway_state.json`
-- Controls the gateway via the active profile's launcher command, for example:
-  - `/Users/xiayh/Projects/install_hermers/run-hermes-local.sh -p yong gateway ...`
+## Download
 
-## Features in the current build
+Download the latest release from the [Releases](https://github.com/xiayh17/HermesStation/releases) page.
 
-- Gateway service state
-- Platform connection state
-- Active agent count
-- Session count and recent sessions
-- LaunchAgent install / start / stop / restart
-- Open logs / workspace / Hermes home
-- Quick profile switching from the menu bar
-- Settings window for multi-profile management, gateway paths, polling interval, and model defaults
+## Features
 
-## Build
+- **Gateway service state** — Monitor gateway status directly from the menu bar
+- **Platform connection state** — See which platforms are connected, disconnected, or connecting at a glance
+- **Active agent count** — Track how many agents are currently running
+- **Session count and recent sessions** — View 24-hour and 7-day usage statistics
+- **Service controls** — Install, start, stop, restart, or repair the gateway LaunchAgent
+- **Quick profile switching** — Switch between multiple Hermes profiles instantly from the menu bar
+- **Settings** — Configure multi-profile management, gateway paths, polling intervals, and model defaults
+
+## Requirements
+
+- macOS 14.0+
+- Swift 6.2
+- A local Hermes installation
+
+## Build from source
 
 ```bash
-cd /Users/xiayh/Projects/hermes-station-menubar
+git clone https://github.com/xiayh17/HermesStation.git
+cd HermesStation
 swift build
 ```
 
 ## Package as a macOS app
 
 ```bash
-cd /Users/xiayh/Projects/hermes-station-menubar
 ./scripts/package-app.sh
 ```
 
 This creates:
 
-```text
+```
 dist/HermesStationMenuBar.app
 ```
 
-## Run the app bundle
+You can then open it with:
 
 ```bash
-open /Users/xiayh/Projects/hermes-station-menubar/dist/HermesStationMenuBar.app
+open dist/HermesStationMenuBar.app
 ```
+
+## Architecture
+
+This is a macOS menu bar app (`LSUIElement`) that monitors and controls a Hermes gateway instance. It runs as a background-only app with a popover UI from the menu bar icon.
+
+### Core Stores
+
+| Store | Responsibility |
+|-------|----------------|
+| `SettingsStore` | Reads/writes `~/Library/Application Support/HermesStationMenuBar/settings.json` |
+| `HermesProfileStore` | Reads Hermes `config.yaml` + `.env`; writes via `hermes config set` CLI |
+| `GatewayStore` | Polls `gateway_state.json` + `state.db` on a timer; drives service control via launcher script |
+
+### Data Flow
+
+- **Path derivation**: `AppSettings` → `HermesPaths` computes all filesystem paths from profile name + project root
+- **Gateway status**: `GatewayStore.makeSnapshot()` reads `gateway_state.json`, checks `launchctl list`, and queries `state.db` (SQLite) for sessions
+- **External commands**: All subprocess execution goes through `CommandRunner` (async `Process` wrapper)
+
+## License
+
+MIT License — see [LICENSE](LICENSE) for details.
