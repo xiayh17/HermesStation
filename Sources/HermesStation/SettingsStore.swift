@@ -14,7 +14,9 @@ final class SettingsStore: ObservableObject {
             .appending(path: "Library/Application Support/HermesStation", directoryHint: .isDirectory)
         settingsURL = appSupport.appending(path: "settings.json")
 
-        let stored = Self.loadStoreFile(from: settingsURL) ?? .default
+        let stored = Self.loadStoreFile(from: settingsURL)
+            ?? Self.migrateFromLegacyDirectory(using: fileManager)
+            ?? .default
         let resolved = Self.normalize(stored)
         profiles = resolved.profiles
         activeProfileID = resolved.activeProfileID
@@ -137,6 +139,13 @@ final class SettingsStore: ObservableObject {
         }
 
         return nil
+    }
+
+    private static func migrateFromLegacyDirectory(using fileManager: FileManager) -> AppSettingsStoreFile? {
+        let legacyURL = fileManager.homeDirectoryForCurrentUser
+            .appending(path: "Library/Application Support/HermesStationMenuBar/settings.json")
+        guard let store = loadStoreFile(from: legacyURL) else { return nil }
+        return store
     }
 
     private static func normalize(_ stored: AppSettingsStoreFile) -> AppSettingsStoreFile {
