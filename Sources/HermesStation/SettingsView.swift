@@ -211,7 +211,7 @@ struct SettingsView: View {
             refreshPlatformInstances()
             refreshPlatformDiagnostics()
         }
-        .onChange(of: gatewayStore.snapshot.runtime?.updatedAt) { _, _ in
+        .onChange(of: gatewayStore.snapshot.trustedRuntime?.updatedAt) { _, _ in
             refreshPlatformDiagnostics()
         }
         .onChange(of: gatewayStore.snapshot.serviceStatus) { _, _ in
@@ -292,6 +292,12 @@ struct SettingsView: View {
                             .frame(width: 36)
                     }
                 }
+
+                Toggle("Auto-cleanup duplicate gateways", isOn: $appDraft.autoCleanupDuplicateGateways)
+                    .font(.system(size: 12))
+
+                Toggle("Auto-restart when runtime file is stale", isOn: $appDraft.autoRestartOnStaleRuntime)
+                    .font(.system(size: 12))
             }
 
             Section("派生路径") {
@@ -312,6 +318,8 @@ struct SettingsView: View {
                             workspaceRootPath: AppSettings.default.workspaceRootPath,
                             launcherPath: AppSettings.default.launcherPath,
                             refreshIntervalSeconds: AppSettings.default.refreshIntervalSeconds,
+                            autoCleanupDuplicateGateways: AppSettings.default.autoCleanupDuplicateGateways,
+                            autoRestartOnStaleRuntime: AppSettings.default.autoRestartOnStaleRuntime,
                             modelProviders: appDraft.modelProviders
                         )
                         settingsStore.reset()
@@ -434,6 +442,7 @@ struct SettingsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     currentHermesActiveSection
+                    endpointTransparencySection
                     hermesNotesSection
                 }
                 .padding(20)
@@ -456,6 +465,7 @@ struct SettingsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     modelHealthSection
+                    endpointTransparencySection
                     hermesNotesSection
                 }
                 .padding(20)
@@ -606,6 +616,107 @@ struct SettingsView: View {
                 }
             }
             .padding(.top, 4)
+        }
+    }
+
+    @ViewBuilder
+    private var endpointTransparencySection: some View {
+        if let transparency = gatewayStore.snapshot.endpointTransparency {
+            GroupBox("Endpoint Transparency") {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: transparency.hasMismatch ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                            .foregroundStyle(transparency.hasMismatch ? .orange : .green)
+                            .padding(.top, 2)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("\(transparency.provider) • \(transparency.model)")
+                                .font(.system(size: 13, weight: .semibold))
+                            Text("这里不再猜“运行时大概会怎么解析”，而是直接把 `config.yaml`、`.env`、`auth.json credential_pool` 和最新 `request_dump` 的 endpoint 并排展示出来。")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer()
+                        statusBadge(transparency.hasMismatch ? "来源不一致" : "来源一致", color: transparency.hasMismatch ? .orange : .green)
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(transparency.sourceRows.enumerated()), id: \.offset) { _, row in
+                            endpointSourceRow(row)
+                        }
+                    }
+
+                    if !transparency.credentialPoolEntries.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Credential Pool Entries")
+                                .font(.system(size: 12, weight: .medium))
+                            ForEach(transparency.credentialPoolEntries) { entry in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("\(entry.label) • \(entry.source ?? "unknown")")
+                                        .font(.system(size: 11, weight: .medium))
+                                    Text(entry.baseURL ?? "no base_url")
+                                        .font(.system(size: 10, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                        .textSelection(.enabled)
+                                    if let requestCount = entry.requestCount {
+                                        Text("request_count: \(requestCount)")
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                .padding(8)
+                                .background(Color.secondary.opacity(0.06))
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                            }
+                        }
+                    }
+
+                    if let latestDump = transparency.latestRequestDump {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Latest Request Dump")
+                                .font(.system(size: 12, weight: .medium))
+                            if let timestamp = latestDump.timestamp {
+                                Text("timestamp: \(timestamp)")
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                            }
+                            if let reason = latestDump.reason, !reason.isEmpty {
+                                Text("reason: \(reason)")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                            }
+                            if let errorMessage = latestDump.errorMessage, !errorMessage.isEmpty {
+                                Text(errorMessage)
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+
+                    HStack {
+                        Button("Open auth.json") {
+                            gatewayStore.openAuthStore()
+                        }
+                        Button("Open latest request dump") {
+                            gatewayStore.openLatestRequestDump()
+                        }
+                        .disabled(transparency.latestRequestDump == nil)
+                        Spacer()
+                        Button("Sync auth pool -> Hermes") {
+                            syncEndpointTransparency(restartAfter: false)
+                        }
+                        .disabled(endpointSyncTargetBaseURL == nil)
+                        Button("Sync + Restart Gateway") {
+                            syncEndpointTransparency(restartAfter: true)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(endpointSyncTargetBaseURL == nil)
+                    }
+                }
+                .padding(.top, 4)
+            }
         }
     }
 
@@ -1105,7 +1216,7 @@ struct SettingsView: View {
             HStack {
                 summaryPill(title: "Active", value: "\(gatewayStore.snapshot.agentSessions.activeCount)")
                 summaryPill(title: "Tracked", value: "\(gatewayStore.snapshot.agentSessions.totalCount)")
-                summaryPill(title: "Runtime", value: "\(gatewayStore.snapshot.runtime?.activeAgents ?? 0)")
+                summaryPill(title: "Runtime", value: "\(gatewayStore.snapshot.trustedRuntime?.activeAgents ?? 0)")
             }
             .padding(.horizontal, 12)
             .padding(.top, 12)
@@ -1470,6 +1581,7 @@ struct SettingsView: View {
     private func platformSidebarRow(_ instance: PlatformInstance) -> some View {
         let descriptor = PlatformDescriptorRegistry.descriptor(for: instance.platformID)
         let runtimeState = gatewayStore.snapshot.runtime?.platforms[instance.platformID]
+        let isStale = gatewayStore.snapshot.runtimeIsStale
         return Button {
             selectedPlatformInstanceID = instance.id
             loadPlatformConfigDraft(for: instance)
@@ -1477,7 +1589,7 @@ struct SettingsView: View {
             HStack(alignment: .center, spacing: 10) {
                 Image(systemName: descriptor?.icon ?? "network")
                     .font(.system(size: 16))
-                    .foregroundStyle(platformColor(runtimeState?.state))
+                    .foregroundStyle(isStale ? Color.secondary : platformColor(runtimeState?.state))
                     .frame(width: 24)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(instance.displayName)
@@ -1487,9 +1599,15 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Circle()
-                    .fill(platformColor(runtimeState?.state))
-                    .frame(width: 8, height: 8)
+                if isStale {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 8))
+                        .foregroundStyle(.orange)
+                } else {
+                    Circle()
+                        .fill(platformColor(runtimeState?.state))
+                        .frame(width: 8, height: 8)
+                }
             }
             .padding(.vertical, 6)
             .contentShape(Rectangle())
@@ -1515,6 +1633,20 @@ struct SettingsView: View {
                                 .textSelection(.enabled)
                         }
                         Spacer()
+                    }
+
+                    if gatewayStore.snapshot.runtimeIsStale {
+                        HStack(spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                            Text("gateway_state.json is stale; showing cached platform states.")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(Color.orange.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
                     }
 
                     GroupBox("Configuration") {
@@ -1690,8 +1822,8 @@ struct SettingsView: View {
     private func platformDiagnosticsSection(for instance: PlatformInstance) -> some View {
         let runtimeState = gatewayStore.snapshot.runtime?.platforms[instance.platformID]
         let hints = platformDiagnosticHints(for: instance, runtimeState: runtimeState, logLines: platformDiagnosticLines)
-        let activeSessions = gatewayStore.snapshot.runtime?.activeSessions?[instance.platformID] ?? []
-        let modelOverrides = gatewayStore.snapshot.runtime?.modelOverrides?[instance.platformID] ?? []
+        let activeSessions = gatewayStore.snapshot.trustedRuntime?.activeSessions?[instance.platformID] ?? []
+        let modelOverrides = gatewayStore.snapshot.trustedRuntime?.modelOverrides?[instance.platformID] ?? []
 
         VStack(alignment: .leading, spacing: 12) {
             if let platformDiagnosticSummary {
@@ -1860,6 +1992,10 @@ struct SettingsView: View {
             return hints
         }
 
+        if gatewayStore.snapshot.runtimeIsStale {
+            hints.append("The live gateway process exists, but gateway_state.json is stale. Treat runtime/platform state as unknown until the gateway refreshes that file.")
+        }
+
         if runtimeState == nil {
             hints.append("The running gateway has not loaded this platform yet. Restart gateway after saving config so the adapter is created on startup.")
         }
@@ -1993,6 +2129,9 @@ struct SettingsView: View {
         if let state = runtimeState?.state, !state.isEmpty {
             return state
         }
+        if gatewayStore.snapshot.runtimeIsStale {
+            return "runtime status stale"
+        }
         return instance.isEnabled ? "not connected" : "configuration incomplete"
     }
 
@@ -2058,6 +2197,9 @@ struct SettingsView: View {
         }
         guard gatewayStore.snapshot.serviceLoaded else {
             return "Gateway service is not running. Start or restart it after saving platform config."
+        }
+        if gatewayStore.snapshot.runtimeIsStale {
+            return "Gateway process is alive, but gateway_state.json is stale. HermesStation is trusting launchd/ps/gateway.pid instead of the runtime file."
         }
         guard let runtimeState else {
             return "This platform is configured, but the running gateway has not loaded it into runtime yet. Restart gateway and check the logs below."
@@ -2274,6 +2416,10 @@ struct SettingsView: View {
                 pathRow("config.yaml", path: profileStore.snapshot.configURL.path, action: profileStore.openConfigFile)
                 pathRow(".env", path: profileStore.snapshot.envURL.path, action: profileStore.openEnvFile)
                 pathRow("SOUL.md", path: profileStore.snapshot.soulURL.path, action: profileStore.openSoulFile)
+                pathRow("auth.json", path: HermesPaths(settings: settingsStore.settings).authStore.path, action: gatewayStore.openAuthStore)
+                if let latestDump = gatewayStore.snapshot.endpointTransparency?.latestRequestDump {
+                    pathRow("latest request_dump", path: latestDump.fileURL.path, action: gatewayStore.openLatestRequestDump)
+                }
             }
 
             Section("Utilities") {
@@ -2288,6 +2434,8 @@ struct SettingsView: View {
                     Button("Open Hermes Home") { gatewayStore.openHermesHome() }
                 }
             }
+
+            hermesReleasesSection
 
             Section("工作目录") {
                 labeledField("terminal.cwd", text: $hermesDraft.terminalCwd)
@@ -2319,6 +2467,157 @@ struct SettingsView: View {
     }
 
     // MARK: - Shared
+
+    @ViewBuilder
+    private var hermesReleasesSection: some View {
+        let info = gatewayStore.snapshot.releaseInfo
+        let updateState = gatewayStore.updater.state
+        Section("Hermes Releases") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Installed")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                        Text(info?.currentVersion ?? "Unknown")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Latest")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                        Text(info?.latestVersion ?? "–")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    if info?.isUpdateAvailable == true {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .foregroundStyle(.green)
+                            .font(.system(size: 20))
+                    }
+                }
+
+                if let published = info?.publishedAt, !published.isEmpty {
+                    Text("Published: \(published)")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+
+                if let error = info?.fetchError, !error.isEmpty {
+                    HStack(spacing: 4) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.orange)
+                        Text(error)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let error = updateState.errorMessage, !error.isEmpty {
+                    HStack(spacing: 4) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.red)
+                        Text(error)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                switch updateState {
+                case .idle, .failed:
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 8) {
+                            if info?.isUpdateAvailable == true, let tag = info?.latestTag {
+                                Button("Prepare \(tag)") {
+                                    gatewayStore.updater.prepareUpdate(to: tag)
+                                }
+                                .disabled(gatewayStore.updater.isBusy)
+                            }
+
+                            Button("Run hermes update") {
+                                gatewayStore.runHermesUpdate()
+                            }
+                            .disabled(gatewayStore.isBusy)
+
+                            Spacer()
+                        }
+                        HStack(spacing: 8) {
+                            Button("Open Release Page") {
+                                gatewayStore.openLatestReleasePage()
+                            }
+                            .disabled(info?.releaseURL == nil)
+
+                            Button("Refresh") {
+                                gatewayStore.refresh()
+                            }
+                            .disabled(gatewayStore.isBusy)
+
+                            Spacer()
+                        }
+                    }
+
+                case .preparing(_, let message):
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                        Text(message)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                    }
+
+                case .ready(let tag, _):
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                            Text("\(tag) ready")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.green)
+                            Spacer()
+                        }
+                        HStack(spacing: 8) {
+                            Button("Apply & Restart") {
+                                gatewayStore.applyPreparedUpdate()
+                            }
+                            .disabled(gatewayStore.isBusy || gatewayStore.updater.isBusy)
+
+                            Button("Discard") {
+                                gatewayStore.updater.discardPreparedUpdate()
+                            }
+                            .disabled(gatewayStore.isBusy)
+
+                            Spacer()
+                        }
+                    }
+
+                case .applying(_, let message):
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                        Text(message)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                    }
+
+                case .completed(let tag):
+                    HStack(spacing: 4) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        Text("Updated to \(tag). Restarted.")
+                            .font(.system(size: 11, weight: .semibold))
+                        Spacer()
+                    }
+                }
+            }
+        }
+    }
 
     @ViewBuilder
     private var hermesNotesSection: some View {
@@ -2560,6 +2859,49 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
         }
+    }
+
+    private func endpointSourceRow(_ row: EndpointSourceSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .center, spacing: 8) {
+                Text(row.label)
+                    .font(.system(size: 11, weight: .medium))
+                statusBadge(row.isMismatch ? "mismatch" : "ok", color: row.isMismatch ? .orange : .green)
+                Spacer()
+            }
+            Text(row.value ?? "—")
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(row.isMismatch ? Color.orange : Color.secondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            if let detail = row.detail, !detail.isEmpty {
+                Text(detail)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(8)
+        .background((row.isMismatch ? Color.orange : Color.secondary).opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    private var endpointSyncTargetBaseURL: String? {
+        let trimmed = hermesDraft.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func syncEndpointTransparency(restartAfter: Bool) {
+        guard let transparency = gatewayStore.snapshot.endpointTransparency,
+              let targetBaseURL = endpointSyncTargetBaseURL else {
+            return
+        }
+        gatewayStore.syncCredentialPoolBaseURL(
+            providerID: transparency.provider,
+            desiredBaseURL: targetBaseURL,
+            apiKey: hermesDraft.apiKey,
+            restartAfter: restartAfter
+        )
     }
 
     private func mappingHint(_ text: String) -> some View {

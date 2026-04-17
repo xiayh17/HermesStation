@@ -77,10 +77,82 @@ struct MenuContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Gateway")
                 .font(.headline)
+
+            if store.snapshot.hasDuplicateGatewayProcesses {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                    Text("检测到 \(store.snapshot.gatewayProcesses.count) 个 gateway 进程同时运行")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.red)
+                    Spacer()
+                    Button("Kill Others") {
+                        store.killDuplicateGateways()
+                    }
+                    .disabled(store.isBusy)
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Color.red.opacity(0.15))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                .padding(.vertical, 6)
+                .padding(.horizontal, 8)
+                .background(Color.red.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+
+            if store.snapshot.gatewayProcesses.count > 1 {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(store.snapshot.gatewayProcesses) { process in
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(process.isAuthoritative ? Color.green : Color.orange)
+                                .frame(width: 6, height: 6)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("PID \(process.id)")
+                                    .font(.system(size: 11, weight: .semibold))
+                                Text(processLine(process: process))
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            if !process.isAuthoritative {
+                                Button("Primary") {
+                                    store.promoteToAuthoritative(pid: process.id)
+                                }
+                                .disabled(store.isBusy)
+                                .font(.system(size: 10))
+                                .buttonStyle(.plain)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.accentColor.opacity(0.12))
+                                .clipShape(RoundedRectangle(cornerRadius: 4))
+                                Button("Kill") {
+                                    store.killGateway(pid: process.id)
+                                }
+                                .disabled(store.isBusy)
+                                .font(.system(size: 10))
+                                .buttonStyle(.plain)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.red.opacity(0.12))
+                                .clipShape(RoundedRectangle(cornerRadius: 4))
+                            }
+                        }
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 4)
+                        .background(Color.secondary.opacity(0.06))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                }
+            }
+
             HStack {
                 statusPill("Installed", value: store.snapshot.serviceInstalled ? "yes" : "no")
                 statusPill("Loaded", value: store.snapshot.serviceLoaded ? "yes" : "no")
-                statusPill("Agents", value: "\(store.snapshot.runtime?.activeAgents ?? 0)")
+                statusPill("Agents", value: "\(store.snapshot.trustedRuntime?.activeAgents ?? 0)")
             }
             Text(serviceDetailLine)
                 .font(.system(size: 11))
@@ -135,8 +207,19 @@ struct MenuContentView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Platforms")
                 .font(.headline)
-            ForEach(Array((store.snapshot.runtime?.platforms ?? [:]).keys.sorted()), id: \.self) { key in
-                let value = store.snapshot.runtime?.platforms[key]
+            if store.snapshot.runtimeIsStale {
+                HStack(spacing: 4) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.orange)
+                    Text("Runtime file stale; showing cached platforms")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.bottom, 2)
+            }
+            ForEach(Array((store.snapshot.displayPlatforms ?? [:]).keys.sorted()), id: \.self) { key in
+                let value = store.snapshot.displayPlatforms?[key]
                 HStack {
                     Circle()
                         .fill(platformColor(value?.state))
@@ -240,8 +323,14 @@ struct MenuContentView: View {
     }
 
     private var statusLine: String {
-        if let runtime = store.snapshot.runtime {
+        if let runtime = store.snapshot.trustedRuntime {
             return "state: \(runtime.gatewayState ?? "unknown") · updated: \(runtime.updatedAt ?? "n/a")"
+        }
+        if let pid = store.snapshot.authoritativeGatewayPID {
+            if store.snapshot.runtimeIsStale {
+                return "state: live pid \(pid) · runtime file stale"
+            }
+            return "state: process alive · pid \(pid)"
         }
         return "state: no runtime status file yet"
     }
@@ -274,15 +363,47 @@ struct MenuContentView: View {
         return "\(displayName) · -p \(profileID)"
     }
 
+    private func processLine(process: GatewayProcessInfo) -> String {
+        var parts: [String] = []
+        if process.isLaunchdManaged {
+            parts.append("launchd")
+        }
+        if process.isAuthoritative {
+            parts.append("authoritative")
+        }
+        if let startTime = process.startTime {
+            let formatter = RelativeDateTimeFormatter()
+            formatter.unitsStyle = .short
+            parts.append(formatter.localizedString(for: startTime, relativeTo: Date()))
+        }
+        if parts.isEmpty {
+            return process.command
+        }
+        return parts.joined(separator: " · ")
+    }
+
     private var serviceDetailLine: String {
-        switch store.snapshot.serviceStatus {
-        case .running:
-            if let pid = store.snapshot.runtime?.pid {
+        if store.snapshot.hasDuplicateGatewayProcesses {
+            let pids = store.snapshot.duplicateGatewayPIDs.map(String.init).joined(separator: ", ")
+            return "⚠️ PIDs: \(pids)。多实例会抢消息，导致 404 和状态抖动。"
+        }
+        if let pid = store.snapshot.authoritativeGatewayPID {
+            if let reason = store.snapshot.runtimeStaleReason, !reason.isEmpty {
+                return "live pid \(pid) · trusting launchd/ps/gateway.pid · stale runtime: \(reason)"
+            }
+            if store.snapshot.serviceLoaded {
                 return "launchd loaded · pid \(pid)"
             }
+            return "gateway process alive · pid \(pid)"
+        }
+        switch store.snapshot.serviceStatus {
+        case .running:
             return "launchd loaded"
         case .degraded:
-            return "service loaded, but one or more platforms are degraded"
+            if store.snapshot.serviceLoaded {
+                return "launchd loaded, but no trusted live gateway process was detected"
+            }
+            return "service metadata exists, but no trusted live gateway process was detected"
         case .stopped:
             return "service installed but not running"
         case .unknown:
@@ -319,6 +440,9 @@ struct MenuContentView: View {
     }
 
     private var iconColor: Color {
+        if store.snapshot.hasDuplicateGatewayProcesses {
+            return .red
+        }
         switch store.snapshot.serviceStatus {
         case .running: return .green
         case .degraded: return .orange
