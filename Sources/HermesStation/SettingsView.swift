@@ -167,6 +167,7 @@ struct SettingsView: View {
     @State private var modelHealthResults: [HermesProfileStore.ModelHealthResult] = []
     @State private var isCheckingModelHealth = false
     @State private var modelHealthFixMessage: String?
+    @State private var newAliasName: String = ""
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -2437,6 +2438,8 @@ struct SettingsView: View {
 
             hermesReleasesSection
 
+            aliasScriptsSection
+
             Section("工作目录") {
                 labeledField("terminal.cwd", text: $hermesDraft.terminalCwd)
                 mappingHint("config.yaml → terminal.cwd")
@@ -2672,6 +2675,75 @@ struct SettingsView: View {
                             .font(.system(size: 11, weight: .semibold))
                         Spacer()
                     }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var aliasScriptsSection: some View {
+        let aliases = gatewayStore.snapshot.aliases
+        Section("Profile Aliases") {
+            VStack(alignment: .leading, spacing: 8) {
+                if aliases.isEmpty {
+                    Text("No alias scripts found in ~/.local/bin for this profile.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(aliases) { alias in
+                            HStack(spacing: 8) {
+                                Image(systemName: alias.isStandard ? "checkmark.circle.fill" : "info.circle.fill")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(alias.isStandard ? .green : .orange)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(alias.name)
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .textSelection(.enabled)
+                                    if !alias.isStandard {
+                                        Text("Custom wrapper script (non-standard)")
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(.orange)
+                                    }
+                                }
+                                Spacer()
+                                Button("Remove") {
+                                    gatewayStore.removeAlias(name: alias.name)
+                                }
+                                .disabled(gatewayStore.isBusy)
+                                .font(.system(size: 10))
+                                .buttonStyle(.plain)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(Color.red.opacity(0.12))
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                            }
+                            .padding(8)
+                            .background(Color.secondary.opacity(0.06))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    TextField("New alias name", text: $newAliasName)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 12))
+                    Button("Create Alias") {
+                        let name = newAliasName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !name.isEmpty else { return }
+                        gatewayStore.createAlias(name: name)
+                        newAliasName = ""
+                    }
+                    .disabled(gatewayStore.isBusy || newAliasName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                }
+
+                if !aliases.isEmpty {
+                    Text("Aliases let you run this profile from anywhere by typing the alias name in a terminal.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
                 }
             }
         }

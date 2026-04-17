@@ -553,6 +553,7 @@ final class GatewayStore: ObservableObject {
         }
 
         let releaseInfo = await loadReleaseInfo(settings: settings)
+        let aliases = loadAliasScripts(settings: settings)
 
         return GatewaySnapshot(
             serviceInstalled: plistExists,
@@ -567,6 +568,7 @@ final class GatewayStore: ObservableObject {
             gatewayProcesses: enrichedProcesses,
             endpointTransparency: endpointTransparency,
             releaseInfo: releaseInfo,
+            aliases: aliases,
             sessions: sessions,
             agentSessions: agentSessions,
             usage: usage,
@@ -633,6 +635,77 @@ final class GatewayStore: ObservableObject {
         let version = versionResult?.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         let isMatching = target == expected || path == expected
         return (path, target, version, isMatching)
+    }
+
+    nonisolated private static func loadAliasScripts(settings: AppSettings) -> [HermesAliasScript] {
+        let wrapperDir = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".local/bin")
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: wrapperDir.path) else {
+            return []
+        }
+        let profilePattern = "-p \(settings.profileName)"
+        let launcherPattern = settings.launcherPath
+        return entries.compactMap { name in
+            let filePath = wrapperDir.appending(path: name).path
+            guard FileManager.default.isExecutableFile(atPath: filePath),
+                  let data = FileManager.default.contents(atPath: filePath),
+                  let text = String(data: data, encoding: .utf8) else { return nil }
+            let refersToProfile = text.contains(profilePattern) || text.contains(launcherPattern)
+            guard refersToProfile else { return nil }
+            let standard = "#!/bin/sh\nexec hermes -p \(settings.profileName) \"$@\"\n"
+            return HermesAliasScript(
+                id: name,
+                name: name,
+                path: filePath,
+                content: text,
+                isStandard: text.trimmingCharacters(in: .whitespacesAndNewlines) == standard.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        }
+        .sorted { $0.name < $1.name }
+    }
+
+    func createAlias(name: String) {
+        guard !name.isEmpty else {
+            snapshot.lastCommandOutput = "Alias name cannot be empty."
+            return
+        }
+        guard !isBusy else { return }
+        isBusy = true
+        Task {
+            defer { Task { @MainActor in self.isBusy = false } }
+            let args: [String] = ["profile", "alias", settingsStore.settings.profileName, "--name", name]
+            do {
+                let result = try await CommandRunner.runHermes(settingsStore.settings, args)
+                await MainActor.run {
+                    self.snapshot.lastCommandOutput = result.combinedOutput.isEmpty ? "Created alias '\(name)'." : result.combinedOutput
+                    self.refresh()
+                }
+            } catch {
+                await MainActor.run {
+                    self.snapshot.lastCommandOutput = "Failed to create alias: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    func removeAlias(name: String) {
+        guard !name.isEmpty else { return }
+        guard !isBusy else { return }
+        isBusy = true
+        Task {
+            defer { Task { @MainActor in self.isBusy = false } }
+            let args: [String] = ["profile", "alias", settingsStore.settings.profileName, "--remove", "--name", name]
+            do {
+                let result = try await CommandRunner.runHermes(settingsStore.settings, args)
+                await MainActor.run {
+                    self.snapshot.lastCommandOutput = result.combinedOutput.isEmpty ? "Removed alias '\(name)'." : result.combinedOutput
+                    self.refresh()
+                }
+            } catch {
+                await MainActor.run {
+                    self.snapshot.lastCommandOutput = "Failed to remove alias: \(error.localizedDescription)"
+                }
+            }
+        }
     }
 
     nonisolated private static func readInstalledHermesVersion(settings: AppSettings) async -> String? {

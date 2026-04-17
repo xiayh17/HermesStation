@@ -200,6 +200,19 @@ struct MenuContentView: View {
                         .hoverPlate(cornerRadius: 6)
                 }
             }
+
+            if !store.snapshot.aliases.isEmpty {
+                HStack(spacing: 4) {
+                    Image(systemName: "terminal.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                    Text("Aliases: \(store.snapshot.aliases.map(\.name).joined(separator: ", "))")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Spacer()
+                }
+            }
         }
     }
 

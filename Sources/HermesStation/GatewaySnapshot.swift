@@ -144,6 +144,14 @@ struct GatewayProcessInfo: Identifiable {
     let isAuthoritative: Bool
 }
 
+struct HermesAliasScript: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let path: String
+    let content: String
+    let isStandard: Bool
+}
+
 enum ServiceStatus: String {
     case running
     case stopped
@@ -173,6 +181,7 @@ struct GatewaySnapshot {
     var gatewayProcesses: [GatewayProcessInfo]
     var endpointTransparency: EndpointTransparencySnapshot?
     var releaseInfo: HermesReleaseInfo?
+    var aliases: [HermesAliasScript]
     var sessions: SessionSummary
     var agentSessions: AgentSessionSummary
     var usage: ModelUsageSummary
@@ -191,6 +200,7 @@ struct GatewaySnapshot {
         gatewayProcesses: [],
         endpointTransparency: nil,
         releaseInfo: nil,
+        aliases: [],
         sessions: SessionSummary(totalCount: 0, recent: []),
         agentSessions: .empty,
         usage: .empty,
