@@ -2528,6 +2528,64 @@ struct SettingsView: View {
                     }
                 }
 
+                if let path = info?.globalHermesPath, !path.isEmpty {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 4) {
+                            Image(systemName: info?.isGlobalHermesMatching == true ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                                .font(.system(size: 10))
+                                .foregroundStyle(info?.isGlobalHermesMatching == true ? .green : .orange)
+                            Text("Global hermes: \(path)")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        if let target = info?.globalHermesTarget, !target.isEmpty, target != path {
+                            Text("→ \(target)")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .padding(.leading, 18)
+                        }
+                        if info?.isGlobalHermesMatching == false {
+                            HStack(spacing: 6) {
+                                Text("全局命令指向的安装与当前 profile 不一致")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.orange)
+                                Button("Fix Symlink") {
+                                    Task {
+                                        _ = await gatewayStore.updater.fixGlobalHermesSymlink()
+                                        gatewayStore.refresh()
+                                    }
+                                }
+                                .disabled(gatewayStore.isBusy || gatewayStore.updater.isBusy)
+                                .font(.system(size: 10))
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.mini)
+                            }
+                            .padding(.leading, 18)
+                        }
+                    }
+                } else {
+                    HStack(spacing: 4) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.orange)
+                        Text("未检测到全局 hermes 命令 (PATH 中不存在)")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                        Button("Create Symlink") {
+                            Task {
+                                _ = await gatewayStore.updater.fixGlobalHermesSymlink()
+                                gatewayStore.refresh()
+                            }
+                        }
+                        .disabled(gatewayStore.isBusy || gatewayStore.updater.isBusy)
+                        .font(.system(size: 10))
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.mini)
+                    }
+                }
+
                 switch updateState {
                 case .idle, .failed:
                     VStack(alignment: .leading, spacing: 6) {

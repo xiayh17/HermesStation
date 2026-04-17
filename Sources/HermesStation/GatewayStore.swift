@@ -577,6 +577,7 @@ final class GatewayStore: ObservableObject {
     nonisolated private static func loadReleaseInfo(settings: AppSettings) async -> HermesReleaseInfo {
         let current = await readInstalledHermesVersion(settings: settings)
         let (release, error) = await fetchLatestHermesRelease()
+        let global = await resolveGlobalHermes(settings: settings)
 
         if let release = release {
             let currentTag = extractTag(from: current)
@@ -594,6 +595,10 @@ final class GatewayStore: ObservableObject {
                 publishedAt: release.publishedAt,
                 body: release.body,
                 isUpdateAvailable: isUpdate,
+                globalHermesPath: global.path,
+                globalHermesTarget: global.target,
+                globalHermesVersion: global.version,
+                isGlobalHermesMatching: global.isMatching,
                 fetchError: nil
             )
         } else {
@@ -606,9 +611,28 @@ final class GatewayStore: ObservableObject {
                 publishedAt: nil,
                 body: nil,
                 isUpdateAvailable: false,
+                globalHermesPath: global.path,
+                globalHermesTarget: global.target,
+                globalHermesVersion: global.version,
+                isGlobalHermesMatching: global.isMatching,
                 fetchError: error
             )
         }
+    }
+
+    nonisolated private static func resolveGlobalHermes(settings: AppSettings) async -> (path: String?, target: String?, version: String?, isMatching: Bool) {
+        let expected = HermesPaths(settings: settings).projectRoot.appending(path: "hermes-agent/venv/bin/hermes").path
+        let whichResult = try? await CommandRunner.run("/usr/bin/which", ["hermes"])
+        guard whichResult?.status == 0 else {
+            return (nil, nil, nil, false)
+        }
+        let path = whichResult!.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        let readlinkResult = try? await CommandRunner.run("/usr/bin/readlink", [path])
+        let target = readlinkResult?.stdout.trimmingCharacters(in: .whitespacesAndNewlines) ?? path
+        let versionResult = try? await CommandRunner.run(path, ["--version"])
+        let version = versionResult?.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isMatching = target == expected || path == expected
+        return (path, target, version, isMatching)
     }
 
     nonisolated private static func readInstalledHermesVersion(settings: AppSettings) async -> String? {

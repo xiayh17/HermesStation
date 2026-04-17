@@ -67,6 +67,10 @@ struct HermesReleaseInfo {
     let publishedAt: String?
     let body: String?
     let isUpdateAvailable: Bool
+    let globalHermesPath: String?
+    let globalHermesTarget: String?
+    let globalHermesVersion: String?
+    let isGlobalHermesMatching: Bool
     let fetchError: String?
 }
 

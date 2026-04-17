@@ -174,6 +174,9 @@ final class HermesUpdater: ObservableObject {
             return state.errorMessage
         }
 
+        // 4. Ensure global `hermes` symlink points to the updated installation
+        let _ = await fixGlobalHermesSymlink()
+
         state = .completed(tag: tag)
         return nil
     }
@@ -200,6 +203,33 @@ final class HermesUpdater: ObservableObject {
 
     private func stagingDir(for tag: String) -> URL {
         projectRoot.appending(path: "hermes-agent-staging-\(tag)")
+    }
+
+    func fixGlobalHermesSymlink() async -> String? {
+        let expected = projectRoot.appending(path: "hermes-agent/venv/bin/hermes").path
+        let whichResult = try? await CommandRunner.run("/usr/bin/which", ["hermes"])
+        let localBin = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".local/bin")
+        let localLink = localBin.appending(path: "hermes").path
+
+        if whichResult?.status != 0 {
+            // No global hermes in PATH; create symlink at ~/.local/bin/hermes
+            try? FileManager.default.createDirectory(at: localBin, withIntermediateDirectories: true)
+            let result = try? await CommandRunner.run("/bin/ln", ["-sf", expected, localLink])
+            guard result?.status == 0 else { return "Failed to create symlink at \(localLink)" }
+            return nil
+        }
+
+        let globalPath = whichResult!.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        let readlinkResult = try? await CommandRunner.run("/usr/bin/readlink", [globalPath])
+        let target = readlinkResult?.stdout.trimmingCharacters(in: .whitespacesAndNewlines) ?? globalPath
+
+        if target == expected || globalPath == expected {
+            return nil
+        }
+
+        let result = try? await CommandRunner.run("/bin/ln", ["-sf", expected, globalPath])
+        guard result?.status == 0 else { return "Failed to update symlink \(globalPath) -> \(expected)" }
+        return nil
     }
 
     private func resolvePythonPath() -> String {
