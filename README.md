@@ -20,6 +20,11 @@ Download the latest release from the [Releases](https://github.com/xiayh17/Herme
 - **Quick profile switching** — Switch between multiple Hermes profiles instantly from the menu bar
 - **Settings** — Configure multi-profile management, gateway paths, polling intervals, and model defaults
 
+## Compatibility Recipes
+
+- **Kimi Coding Plan**: HermesStation now recognizes the official working route as `provider=anthropic` with `model.base_url=https://api.kimi.com/coding/`. If a profile is still on the older OpenAI-compatible `/coding/v1` path and starts failing with temperature/tool-calling errors, the app can guide or repair that route directly.
+- **NetEase 163 / 188 Mail**: HermesStation exposes advanced email settings for `EMAIL_IMAP_SEND_ID`, `EMAIL_IMAP_ID_NAME`, `EMAIL_IMAP_ID_VENDOR`, and `EMAIL_SMTP_SECURITY`. These are useful for providers that require IMAP ID after login or need SMTP 465 to use SSL instead of STARTTLS.
+
 ## Requirements
 
 - macOS 14.0+

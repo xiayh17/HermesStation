@@ -468,7 +468,7 @@ struct MenuContentView: View {
         switch state {
         case "connected": return .green
         case "disconnected": return .red
-        case "connecting": return .orange
+        case "connecting", "retrying": return .orange
         default: return .secondary
         }
     }

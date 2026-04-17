@@ -116,7 +116,11 @@ enum CommandRunner {
         try await run("/bin/launchctl", args)
     }
 
+    static func openLocation(_ location: String) async throws -> CommandResult {
+        try await run("/usr/bin/open", [location])
+    }
+
     static func openPath(_ url: URL) async throws -> CommandResult {
-        try await run("/usr/bin/open", [url.path])
+        try await openLocation(url.path)
     }
 }

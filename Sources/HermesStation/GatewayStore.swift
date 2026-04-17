@@ -43,11 +43,16 @@ final class GatewayStore: ObservableObject {
 
     func refresh() {
         let previousOutput = snapshot.lastCommandOutput
+        let previousDoctorReport = snapshot.doctorReport
         let settings = settingsStore.settings
 
         refreshTask?.cancel()
         refreshTask = Task(priority: .utility) { [weak self] in
-            let snapshot = await Self.makeSnapshot(settings: settings, previousOutput: previousOutput)
+            let snapshot = await Self.makeSnapshot(
+                settings: settings,
+                previousOutput: previousOutput,
+                previousDoctorReport: previousDoctorReport
+            )
             guard !Task.isCancelled else { return }
             await MainActor.run {
                 self?.snapshot = snapshot
@@ -86,6 +91,84 @@ final class GatewayStore: ObservableObject {
 
     func restartService() {
         performGatewayAction(["restart"])
+    }
+
+    func runDoctorFix() {
+        guard !isBusy else { return }
+        isBusy = true
+        let settings = settingsStore.settings
+        Task {
+            defer {
+                Task { @MainActor in self.isBusy = false }
+            }
+            do {
+                let result = try await CommandRunner.runHermes(settings, ["doctor", "--fix"])
+                let report = HermesDoctorReport.parse(
+                    output: result.combinedOutput,
+                    exitStatus: result.status,
+                    profileName: settings.profileName
+                )
+                await MainActor.run {
+                    self.snapshot.lastCommandOutput = result.combinedOutput
+                    self.snapshot.doctorReport = report
+                    self.refresh()
+                }
+            } catch {
+                await MainActor.run {
+                    self.snapshot.lastCommandOutput = error.localizedDescription
+                    self.snapshot.doctorReport = HermesDoctorReport.parse(
+                        output: error.localizedDescription,
+                        exitStatus: 1,
+                        profileName: self.settingsStore.settings.profileName
+                    )
+                    self.refresh()
+                }
+            }
+        }
+    }
+
+    func useCurrentHermesProfile() {
+        performHermesAction(["profile", "use", settingsStore.settings.profileName])
+    }
+
+    func installPythonPackage(packageName: String, label: String, restartGatewayAfterInstall: Bool) {
+        guard !isBusy else { return }
+        isBusy = true
+        let settings = settingsStore.settings
+        Task {
+            do {
+                let paths = HermesPaths(settings: settings)
+                guard FileManager.default.isExecutableFile(atPath: paths.pythonExecutable.path) else {
+                    throw NSError(
+                        domain: "HermesStation",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "Hermes Python executable not found at \(paths.pythonExecutable.path)"]
+                    )
+                }
+
+                let result = try await CommandRunner.run(paths.pythonExecutable.path, ["-m", "pip", "install", packageName])
+                await MainActor.run {
+                    self.isBusy = false
+                    if result.status == 0 {
+                        let detail = result.combinedOutput.isEmpty ? "" : "\n\(result.combinedOutput)"
+                        self.snapshot.lastCommandOutput = "Installed \(label).\(detail)"
+                        self.refresh()
+                        if restartGatewayAfterInstall {
+                            self.restartService()
+                        }
+                    } else {
+                        self.snapshot.lastCommandOutput = "Failed to install \(label): \(result.combinedOutput)"
+                        self.refresh()
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    self.isBusy = false
+                    self.snapshot.lastCommandOutput = "Failed to install \(label): \(error.localizedDescription)"
+                    self.refresh()
+                }
+            }
+        }
     }
 
     func openLogs() {
@@ -291,6 +374,10 @@ final class GatewayStore: ObservableObject {
         Task { _ = try? await CommandRunner.openPath(paths.hermesHome) }
     }
 
+    func openHermesRoot() {
+        Task { _ = try? await CommandRunner.openPath(paths.hermesRoot) }
+    }
+
     func openLatestReleasePage() {
         guard let url = snapshot.releaseInfo?.releaseURL else {
             snapshot.lastCommandOutput = "No release URL available."
@@ -485,7 +572,11 @@ final class GatewayStore: ObservableObject {
         }
     }
 
-    nonisolated private static func makeSnapshot(settings: AppSettings, previousOutput: String?) async -> GatewaySnapshot {
+    nonisolated private static func makeSnapshot(
+        settings: AppSettings,
+        previousOutput: String?,
+        previousDoctorReport: HermesDoctorReport?
+    ) async -> GatewaySnapshot {
         let paths = HermesPaths(settings: settings)
         let plistExists = FileManager.default.fileExists(atPath: paths.launchAgentPlist.path)
         let launchctlLoaded = await readLaunchdLoaded(label: paths.launchAgentLabel)
@@ -554,6 +645,8 @@ final class GatewayStore: ObservableObject {
 
         let releaseInfo = await loadReleaseInfo(settings: settings)
         let aliases = loadAliasScripts(settings: settings)
+        let profileAlignment = loadProfileAlignment(settings: settings, paths: paths)
+        let doctorReport = previousDoctorReport?.profileName == settings.profileName ? previousDoctorReport : nil
 
         return GatewaySnapshot(
             serviceInstalled: plistExists,
@@ -569,10 +662,24 @@ final class GatewayStore: ObservableObject {
             endpointTransparency: endpointTransparency,
             releaseInfo: releaseInfo,
             aliases: aliases,
+            profileAlignment: profileAlignment,
+            doctorReport: doctorReport,
             sessions: sessions,
             agentSessions: agentSessions,
             usage: usage,
             lastCommandOutput: previousOutput
+        )
+    }
+
+    nonisolated private static func loadProfileAlignment(settings: AppSettings, paths: HermesPaths) -> HermesProfileAlignment {
+        let stickyURL = paths.hermesRoot.appending(path: "active_profile")
+        let stickyProfile = (try? String(contentsOf: stickyURL, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return HermesProfileAlignment(
+            expectedProfile: settings.profileName,
+            stickyProfile: stickyProfile,
+            hermesRootPath: paths.hermesRoot.path,
+            profileHomePath: paths.hermesHome.path
         )
     }
 
@@ -623,7 +730,9 @@ final class GatewayStore: ObservableObject {
     }
 
     nonisolated private static func resolveGlobalHermes(settings: AppSettings) async -> (path: String?, target: String?, version: String?, isMatching: Bool) {
-        let expected = HermesPaths(settings: settings).projectRoot.appending(path: "hermes-agent/venv/bin/hermes").path
+        let paths = HermesPaths(settings: settings)
+        let expected = paths.launcher.path
+        let legacyExpected = paths.projectRoot.appending(path: "hermes-agent/venv/bin/hermes").path
         let whichResult = try? await CommandRunner.run("/usr/bin/which", ["hermes"])
         guard whichResult?.status == 0 else {
             return (nil, nil, nil, false)
@@ -634,6 +743,9 @@ final class GatewayStore: ObservableObject {
         let versionResult = try? await CommandRunner.run(path, ["--version"])
         let version = versionResult?.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         let isMatching = target == expected || path == expected
+        if !isMatching, target == legacyExpected || path == legacyExpected {
+            return (path, target, version, false)
+        }
         return (path, target, version, isMatching)
     }
 
@@ -768,12 +880,14 @@ final class GatewayStore: ObservableObject {
         let envBaseURL = normalizedOptionalURL(envBaseURLKey.flatMap { envValues[$0] })
         let credentialPoolEntries = loadCredentialPoolEntries(from: paths.authStore, provider: provider)
         let latestRequestDump = loadLatestRequestDump(from: paths.latestRequestDumpURL())
+        let isThirdPartyAnthropicRoute = isThirdPartyAnthropicRoute(provider: provider, configBaseURL: configBaseURL)
 
         let canonical = canonicalSourceURL(
             latestRequestBaseURL: latestRequestDump?.requestBaseURL,
             credentialPoolEntries: credentialPoolEntries,
             envBaseURL: envBaseURL,
-            configBaseURL: configBaseURL
+            configBaseURL: configBaseURL,
+            isThirdPartyAnthropicRoute: isThirdPartyAnthropicRoute
         )
 
         let sourceRows: [EndpointSourceSnapshot] = [
@@ -792,14 +906,23 @@ final class GatewayStore: ObservableObject {
             EndpointSourceSnapshot(
                 label: "auth.json → credential_pool",
                 value: normalizedOptionalURL(credentialPoolEntries.first?.baseURL),
-                detail: credentialPoolEntries.first.map { "\($0.label) • \($0.source ?? "unknown")" } ?? "no entry",
-                isMismatch: isMismatch(value: credentialPoolEntries.first?.baseURL, canonical: canonical)
+                detail: isThirdPartyAnthropicRoute
+                    ? "\(credentialPoolEntries.first?.label ?? "no entry") • official Anthropic default, informational only"
+                    : credentialPoolEntries.first.map { "\($0.label) • \($0.source ?? "unknown")" } ?? "no entry",
+                isMismatch: isThirdPartyAnthropicRoute ? false : isMismatch(value: credentialPoolEntries.first?.baseURL, canonical: canonical)
             ),
             EndpointSourceSnapshot(
                 label: "latest request dump",
                 value: latestRequestDump?.requestURL,
                 detail: latestRequestDump.map {
-                    [$0.reason, $0.errorType].compactMap { $0 }.joined(separator: " • ")
+                    let base = [$0.reason, $0.errorType].compactMap { $0 }.joined(separator: " • ")
+                    if isThirdPartyAnthropicRoute,
+                       let requestBaseURL = $0.requestBaseURL,
+                       let configBaseURL,
+                       areEquivalentKimiCodingRoutes(requestBaseURL, configBaseURL) {
+                        return "\(base) • previous Kimi route variant"
+                    }
+                    return base
                 },
                 isMismatch: isMismatch(value: latestRequestDump?.requestBaseURL, canonical: canonical)
             ),
@@ -813,7 +936,8 @@ final class GatewayStore: ObservableObject {
             envBaseURL: envBaseURL,
             credentialPoolEntries: credentialPoolEntries,
             latestRequestDump: latestRequestDump,
-            sourceRows: sourceRows
+            sourceRows: sourceRows,
+            isThirdPartyAnthropicRoute: isThirdPartyAnthropicRoute
         )
     }
 
@@ -880,8 +1004,12 @@ final class GatewayStore: ObservableObject {
         latestRequestBaseURL: String?,
         credentialPoolEntries: [CredentialPoolEntrySnapshot],
         envBaseURL: String?,
-        configBaseURL: String?
+        configBaseURL: String?,
+        isThirdPartyAnthropicRoute: Bool
     ) -> String? {
+        if isThirdPartyAnthropicRoute, let configBaseURL {
+            return configBaseURL
+        }
         if let latestRequestBaseURL {
             return latestRequestBaseURL
         }
@@ -923,7 +1051,28 @@ final class GatewayStore: ObservableObject {
     nonisolated private static func isMismatch(value: String?, canonical: String?) -> Bool {
         guard let canonical else { return false }
         guard let normalized = normalizedOptionalURL(value) else { return false }
+        if areEquivalentKimiCodingRoutes(normalized, canonical) {
+            return false
+        }
         return normalized != canonical
+    }
+
+    nonisolated private static func isThirdPartyAnthropicRoute(provider: String, configBaseURL: String?) -> Bool {
+        let normalizedProvider = HermesProviderDescriptor.resolve(provider)?.id
+            ?? provider.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard normalizedProvider == "anthropic", let configBaseURL else { return false }
+        return !configBaseURL.lowercased().contains("api.anthropic.com")
+    }
+
+    nonisolated private static func areEquivalentKimiCodingRoutes(_ lhs: String, _ rhs: String) -> Bool {
+        let normalizedLHS = normalizedOptionalURL(lhs)?.lowercased()
+        let normalizedRHS = normalizedOptionalURL(rhs)?.lowercased()
+        let equivalents = Set([
+            "https://api.kimi.com/coding",
+            "https://api.kimi.com/coding/v1"
+        ])
+        guard let normalizedLHS, let normalizedRHS else { return false }
+        return equivalents.contains(normalizedLHS) && equivalents.contains(normalizedRHS)
     }
 
     nonisolated private static func readRuntimeStatus(at url: URL) -> RuntimeStatus? {

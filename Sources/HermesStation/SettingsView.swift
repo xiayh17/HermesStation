@@ -2,6 +2,7 @@ import SwiftUI
 import Charts
 
 private enum SettingsTab: Hashable {
+    case station
     case general
     case model
     case sessions
@@ -119,6 +120,70 @@ private struct ModelHealthProbeTarget {
     let apiKey: String
 }
 
+private let kimiCodingPlanDocsURL = "https://www.kimi.com/code/docs/more/third-party-agents.html"
+
+private enum PlatformDependencyStatus {
+    case ok
+    case info
+    case warning
+    case blocker
+
+    var label: String {
+        switch self {
+        case .ok: return "OK"
+        case .info: return "Info"
+        case .warning: return "Check"
+        case .blocker: return "Blocked"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .ok: return .green
+        case .info: return .blue
+        case .warning: return .orange
+        case .blocker: return .red
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .ok: return "checkmark.circle.fill"
+        case .info: return "info.circle.fill"
+        case .warning: return "exclamationmark.triangle.fill"
+        case .blocker: return "xmark.octagon.fill"
+        }
+    }
+}
+
+private enum PlatformDependencyAction {
+    case installLarkOAPI
+    case restartGateway
+    case openGatewayLog
+    case openEnvFile
+}
+
+private struct PlatformDependencyCheck: Identifiable {
+    let id: String
+    let status: PlatformDependencyStatus
+    let title: String
+    let detail: String
+    let action: PlatformDependencyAction?
+}
+
+private struct HermesProfileOverview: Identifiable {
+    let id: UUID
+    let settings: AppSettings
+    let paths: HermesPaths
+    let configuredPlatforms: [PlatformInstance]
+    let enabledPlatformCount: Int
+    let totalModelCount: Int
+    let configExists: Bool
+    let envExists: Bool
+    let soulExists: Bool
+    let runtimeExists: Bool
+}
+
 struct SettingsView: View {
     @EnvironmentObject private var settingsStore: SettingsStore
     @EnvironmentObject private var profileStore: HermesProfileStore
@@ -164,6 +229,8 @@ struct SettingsView: View {
     @State private var platformDraftOverrides: [String: [String: String]] = [:]
     @State private var platformDiagnosticSummary: String?
     @State private var platformDiagnosticLines: [String] = []
+    @State private var platformDependencyChecks: [PlatformDependencyCheck] = []
+    @State private var isCheckingPlatformDependencies = false
     @State private var modelHealthResults: [HermesProfileStore.ModelHealthResult] = []
     @State private var isCheckingModelHealth = false
     @State private var modelHealthFixMessage: String?
@@ -171,6 +238,9 @@ struct SettingsView: View {
 
     var body: some View {
         TabView(selection: $selectedTab) {
+            stationTab
+                .tabItem { Label("Hermes", systemImage: "square.grid.2x2") }
+                .tag(SettingsTab.station)
             generalTab
                 .tabItem { Label("通用", systemImage: "gearshape") }
                 .tag(SettingsTab.general)
@@ -241,6 +311,197 @@ struct SettingsView: View {
         }
         .onChange(of: gatewayStore.snapshot.agentSessions.totalCount) { _, _ in
             syncAgentSelection()
+        }
+    }
+
+    // MARK: - Station
+
+    private var stationTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                stationCommandCenterSection
+                stationRuntimeHealthSection
+                stationMessagingSection
+                stationFleetSection
+                stationFilesSection
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var stationCommandCenterSection: some View {
+        GroupBox("Hermes Control Center") {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: gatewayStore.snapshot.menuBarSymbol)
+                        .font(.system(size: 28))
+                        .foregroundStyle(stationIconColor)
+                        .frame(width: 34)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(profileSwitcherLabel(for: settingsStore.settings))
+                            .font(.system(size: 18, weight: .semibold))
+                        Text("把当前 profile 当成一个独立 Hermes 实例来管理：模型、消息平台、gateway、日志、doctor、升级都从这里汇总。")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                    if gatewayStore.snapshot.releaseInfo?.isUpdateAvailable == true {
+                        statusBadge("有新版本", color: .green)
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    summaryPill(title: "Gateway", value: gatewayRuntimeHeadline)
+                    summaryPill(title: "Provider", value: activeProviderTitle)
+                    summaryPill(title: "Platforms", value: "\(connectedPlatformCount)/\(configuredPlatformCount) connected")
+                    summaryPill(title: "Agents", value: "\(gatewayStore.snapshot.trustedRuntime?.activeAgents ?? 0)")
+                    summaryPill(title: "Sessions", value: "\(gatewayStore.snapshot.agentSessions.totalCount)")
+                }
+
+                HStack {
+                    Button("Restart Gateway") {
+                        gatewayStore.restartService()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(gatewayStore.isBusy)
+
+                    Button("Doctor --fix") {
+                        gatewayStore.runDoctorFix()
+                    }
+                    .disabled(gatewayStore.isBusy)
+
+                    Button("平台管理") {
+                        selectedTab = .platforms
+                    }
+
+                    Button("模型管理") {
+                        selectedTab = .model
+                    }
+
+                    Button("环境与版本") {
+                        selectedTab = .environment
+                    }
+                }
+            }
+            .padding(.top, 4)
+        }
+    }
+
+    private var stationRuntimeHealthSection: some View {
+        GroupBox("Runtime Health") {
+            VStack(alignment: .leading, spacing: 12) {
+                if let alignment = gatewayStore.snapshot.profileAlignment, !alignment.isAligned {
+                    stationInfoBanner(
+                        title: "CLI profile 与当前实例不一致",
+                        message: "Hermes CLI 默认指向 \(alignment.stickyDisplayName)，但 HermesStation 正在管理 \(alignment.expectedProfile)。先执行 Use This Profile，再继续改 gateway 或平台配置。",
+                        color: .orange
+                    )
+                }
+
+                if let transparency = gatewayStore.snapshot.endpointTransparency, transparency.hasMismatch {
+                    stationInfoBanner(
+                        title: "当前请求来源有分叉",
+                        message: "激活模型的 base URL / auth pool / 最近请求来源不一致。先去模型页确认，再决定是否同步 credential pool。",
+                        color: .orange
+                    )
+                }
+
+                if let report = gatewayStore.snapshot.doctorReport {
+                    doctorReportView(report)
+                } else {
+                    stationInfoBanner(
+                        title: "还没有 doctor 结果",
+                        message: "升级 Hermes 或消息平台掉线后，先跑一次 Doctor --fix，能更快把 profile 对齐到新版本预期。",
+                        color: .blue
+                    )
+                }
+
+                if let latestDump = gatewayStore.snapshot.endpointTransparency?.latestRequestDump,
+                   let errorMessage = latestDump.errorMessage,
+                   !errorMessage.isEmpty {
+                    stationLatestRequestDumpCard(latestDump)
+                }
+
+                if let feishuSession = gatewayStore.snapshot.trustedRuntime?.activeSessions?["feishu"]?.first,
+                   gatewayStore.snapshot.trustedRuntime?.modelOverrides?["feishu"]?.isEmpty != false {
+                    stationInfoBanner(
+                        title: "Feishu 当前跟随主模型",
+                        message: "当前 Feishu 会话 \(feishuSession.sessionKey ?? "unknown") 没有单独的会话级模型绑定，所以会直接使用主模型。这不是故障；只有你在聊天里显式切过 `/model`，才会出现单独 override。",
+                        color: .blue
+                    )
+                }
+            }
+            .padding(.top, 4)
+        }
+    }
+
+    private var stationMessagingSection: some View {
+        GroupBox("Messaging Surfaces") {
+            VStack(alignment: .leading, spacing: 12) {
+                if platformInstancesCache.isEmpty {
+                    stationInfoBanner(
+                        title: "当前实例还没有接入消息平台",
+                        message: "把 Email、Feishu、Weixin 这些入口接进来之后，HermesStation 才能真正成为一站式控制台。",
+                        color: .blue
+                    )
+
+                    HStack {
+                        Button("Add Platform") {
+                            selectedTab = .platforms
+                            openAddPlatformWizard()
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Button("打开平台页") {
+                            selectedTab = .platforms
+                        }
+                    }
+                } else {
+                    LazyVGrid(columns: stationGridColumns, alignment: .leading, spacing: 12) {
+                        ForEach(platformInstancesCache) { instance in
+                            stationPlatformCard(instance)
+                        }
+                    }
+                }
+            }
+            .padding(.top, 4)
+        }
+    }
+
+    private var stationFleetSection: some View {
+        GroupBox("Hermes Fleet") {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("一个 profile 就是一台独立 Hermes。这里按实例列出模型规模、平台配置和关键文件完整度。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+
+                ForEach(profileOverviews) { overview in
+                    stationProfileRow(overview)
+                }
+            }
+            .padding(.top, 4)
+        }
+    }
+
+    private var stationFilesSection: some View {
+        GroupBox("Current Instance Files") {
+            VStack(alignment: .leading, spacing: 10) {
+                pathRow("config.yaml", path: profileStore.snapshot.configURL.path, action: profileStore.openConfigFile)
+                pathRow(".env", path: profileStore.snapshot.envURL.path, action: profileStore.openEnvFile)
+                pathRow("SOUL.md", path: profileStore.snapshot.soulURL.path, action: profileStore.openSoulFile)
+                pathRow("logs", path: HermesPaths(settings: settingsStore.settings).logsDir.path, action: gatewayStore.openLogs)
+
+                HStack {
+                    Button("Open Workspace") { gatewayStore.openWorkspace() }
+                    Button("Open Hermes Home") { gatewayStore.openHermesHome() }
+                    Button("Open Hermes Root") { gatewayStore.openHermesRoot() }
+                    Button("Open settings.json") { settingsStore.openSettingsFile() }
+                }
+            }
+            .padding(.top, 4)
         }
     }
 
@@ -529,6 +790,33 @@ struct SettingsView: View {
                 Text("当前 Hermes 同时只会有一个生效 provider/model。本地目录里的其它条目会显示为未激活。")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
+                if SavedProviderConnection.isKimiCodingPlanAnthropicRoute(providerID: hermesDraft.provider, baseURL: hermesDraft.baseURL) {
+                    stationInfoBanner(
+                        title: "Coding Plan 已按官方兼容方式接入",
+                        message: "当前实例使用 `provider=anthropic` + `https://api.kimi.com/coding/` 连接 Kimi Coding Plan。这个经验已经沉淀到 HermesStation 的验证和导入逻辑里，后续遇到 `/coding/v1` 的兼容问题时会直接提示切换。",
+                        color: .green
+                    )
+                } else if canAdoptOfficialKimiCodingPlanRoute {
+                    stationInfoBanner(
+                        title: "检测到 Kimi Coding Plan 可切换到官方兼容路由",
+                        message: "当前配置仍然可能走 `kimi-coding` 的 OpenAI-compatible 路由。HermesStation 现在支持一键切到 `anthropic + https://api.kimi.com/coding/`，并自动重启 gateway。",
+                        color: .orange
+                    )
+                }
+
+                HStack {
+                    if canAdoptOfficialKimiCodingPlanRoute {
+                        Button("Adopt Official Kimi Route") {
+                            profileStore.adoptKimiCodingPlanOfficialRoute(restartGateway: true)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(profileStore.isSaving)
+                    }
+
+                    Button("Kimi Coding Docs") {
+                        openKimiCodingPlanDocs()
+                    }
+                }
             }
             .padding(.top, 4)
         }
@@ -1665,6 +1953,13 @@ struct SettingsView: View {
                                 .buttonStyle(.borderedProminent)
                                 .disabled(isSavingPlatforms)
 
+                                if canApplyNeteaseEmailPreset {
+                                    Button("Apply 163/188 Preset") {
+                                        applyNeteaseEmailPreset()
+                                    }
+                                    .disabled(isSavingPlatforms)
+                                }
+
                                 Button("Delete Platform") {
                                     deletePlatformConfig()
                                 }
@@ -1844,7 +2139,14 @@ struct SettingsView: View {
                 Button("Open error.log") {
                     gatewayStore.openGatewayErrorLog()
                 }
+
+                Button(isCheckingPlatformDependencies ? "Checking Dependencies..." : "Check Dependencies") {
+                    refreshPlatformDiagnostics()
+                }
+                .disabled(isCheckingPlatformDependencies)
             }
+
+            platformDependencySection
 
             if !activeSessions.isEmpty || !modelOverrides.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
@@ -1965,6 +2267,90 @@ struct SettingsView: View {
         }
     }
 
+    @ViewBuilder
+    private var platformDependencySection: some View {
+        if isCheckingPlatformDependencies {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .scaleEffect(0.7)
+                Text("Checking platform dependencies...")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+        } else if !platformDependencyChecks.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Dependency Checks")
+                    .font(.system(size: 12, weight: .medium))
+
+                ForEach(platformDependencyChecks) { check in
+                    platformDependencyRow(check)
+                }
+            }
+        }
+    }
+
+    private func platformDependencyRow(_ check: PlatformDependencyCheck) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: check.status.symbol)
+                .foregroundStyle(check.status.color)
+                .frame(width: 18)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(check.title)
+                        .font(.system(size: 12, weight: .semibold))
+                    statusBadge(check.status.label, color: check.status.color)
+                }
+                Text(check.detail)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            if let action = check.action {
+                Button(platformDependencyActionTitle(action)) {
+                    performPlatformDependencyAction(action)
+                }
+                .controlSize(.small)
+                .buttonStyle(.bordered)
+                .disabled(gatewayStore.isBusy)
+            }
+        }
+        .padding(10)
+        .background(check.status.color.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func platformDependencyActionTitle(_ action: PlatformDependencyAction) -> String {
+        switch action {
+        case .installLarkOAPI:
+            return "Install + Restart"
+        case .restartGateway:
+            return "Restart Gateway"
+        case .openGatewayLog:
+            return "Open Log"
+        case .openEnvFile:
+            return "Open .env"
+        }
+    }
+
+    private func performPlatformDependencyAction(_ action: PlatformDependencyAction) {
+        switch action {
+        case .installLarkOAPI:
+            gatewayStore.installPythonPackage(
+                packageName: "lark-oapi",
+                label: "Feishu dependency lark-oapi",
+                restartGatewayAfterInstall: true
+            )
+        case .restartGateway:
+            gatewayStore.restartService()
+        case .openGatewayLog:
+            gatewayStore.openGatewayLog()
+        case .openEnvFile:
+            profileStore.openEnvFile()
+        }
+    }
+
     private func platformDiagnosticBanner(_ message: String, isWarning: Bool) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: isWarning ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
@@ -2003,6 +2389,16 @@ struct SettingsView: View {
 
         switch instance.platformID {
         case "email":
+            if combinedContext.contains("unsafe login") || combinedContext.contains("kefu@188.com") {
+                hints.append("The email credentials are present, but the provider rejected mailbox selection as an unsafe login. This is happening after IMAP login, so it is more specific than a bad password.")
+                hints.append("For NetEase 163/188, this often means mailbox-side risk control or an IMAP client-identification requirement. HermesStation can preserve the config, but Hermes itself may still be blocked by the provider until the mailbox trust/security settings are cleared.")
+                hints.append("Hermes now supports explicit `EMAIL_IMAP_SEND_ID` and `EMAIL_SMTP_SECURITY`. For 163/188, prefer `EMAIL_IMAP_SEND_ID=always` and keep port 465 on `EMAIL_SMTP_SECURITY=ssl`.")
+            }
+
+            if combinedContext.contains("could not select inbox") {
+                hints.append("IMAP login succeeded, but the server refused INBOX selection. For 163/188 mailboxes this usually means account-security interception or missing IMAP authorization code.")
+            }
+
             if combinedContext.contains("state auth") && combinedContext.contains("selected") {
                 hints.append("IMAP login likely succeeded, but the adapter failed before selecting INBOX. This usually points to mailbox-selection compatibility, not a missing EMAIL_* field.")
                 hints.append("Collect the gateway.log excerpt and patch Hermes email adapter to validate the result of `select(\"INBOX\")` before running SEARCH.")
@@ -2020,6 +2416,12 @@ struct SettingsView: View {
                 hints.append("Server disconnected usually means an upstream or network interruption. If it keeps repeating, check network stability and the provider service health.")
             }
         case "feishu":
+            if combinedContext.contains("lark-oapi not installed") {
+                hints.append("Feishu config is present, but the Hermes Python environment is missing the optional `lark-oapi` package. Install the Feishu extra or run the package install command in this Hermes venv, then restart gateway.")
+            }
+            if combinedContext.contains("feishu_app_id/secret not set") {
+                hints.append("Gateway did not see FEISHU_APP_ID/FEISHU_APP_SECRET at startup. Check the current profile's `.env`, then restart gateway through Hermes.")
+            }
             if combinedContext.contains("no close frame received or sent") {
                 hints.append("This websocket closed abnormally. Hermes usually reconnects automatically, but repeated failures point to network instability or the upstream websocket service.")
             }
@@ -2032,6 +2434,231 @@ struct SettingsView: View {
         }
 
         return Array(NSOrderedSet(array: hints)) as? [String] ?? hints
+    }
+
+    private static func loadPlatformDependencyChecks(
+        for instance: PlatformInstance,
+        runtimeState: RuntimePlatformState?,
+        summary: String,
+        logLines: [String],
+        settings: AppSettings
+    ) async -> [PlatformDependencyCheck] {
+        guard instance.isEnabled else { return [] }
+
+        let context = ([summary, runtimeState?.errorMessage ?? ""] + logLines)
+            .joined(separator: "\n")
+            .lowercased()
+        var checks: [PlatformDependencyCheck] = []
+
+        switch instance.platformID {
+        case "feishu":
+            let hasHealthyRuntime = runtimeState?.state == "connected"
+                && (runtimeState?.errorMessage?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            let missingKeys = ["FEISHU_APP_ID", "FEISHU_APP_SECRET"].filter { key in
+                (instance.configs[key] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+            if missingKeys.isEmpty {
+                checks.append(PlatformDependencyCheck(
+                    id: "feishu-env-ok",
+                    status: .ok,
+                    title: "Feishu credentials",
+                    detail: "FEISHU_APP_ID and FEISHU_APP_SECRET are configured in this Hermes profile.",
+                    action: nil
+                ))
+            } else {
+                checks.append(PlatformDependencyCheck(
+                    id: "feishu-env-missing",
+                    status: .blocker,
+                    title: "Feishu credentials missing",
+                    detail: "Fill \(missingKeys.joined(separator: " / ")) and save the platform config before restarting gateway.",
+                    action: .openEnvFile
+                ))
+            }
+
+            let hasRuntimeEnvMiss = context.contains("feishu_app_id/secret not set")
+                || (context.contains("feishu_app_id") && context.contains("feishu_app_secret") && context.contains("not set"))
+            if hasRuntimeEnvMiss && missingKeys.isEmpty && !hasHealthyRuntime {
+                checks.append(PlatformDependencyCheck(
+                    id: "feishu-runtime-env-missing",
+                    status: .warning,
+                    title: "Gateway has stale Feishu env",
+                    detail: "The profile has credentials, but the running gateway did not see them at startup. Restart gateway after saving config.",
+                    action: .restartGateway
+                ))
+            }
+
+            let importStatus = await checkHermesPythonImport("lark_oapi", settings: settings)
+            let logSaysMissing = context.contains("lark-oapi not installed") || context.contains("lark_oapi")
+            if importStatus == false {
+                checks.append(PlatformDependencyCheck(
+                    id: "feishu-lark-oapi-missing",
+                    status: .blocker,
+                    title: "lark-oapi package missing",
+                    detail: "Hermes can load Feishu credentials, but the selected Hermes Python environment cannot import lark_oapi.",
+                    action: .installLarkOAPI
+                ))
+            } else if importStatus == true && logSaysMissing && !hasHealthyRuntime {
+                checks.append(PlatformDependencyCheck(
+                    id: "feishu-lark-oapi-restart",
+                    status: .warning,
+                    title: "lark-oapi now installed",
+                    detail: "The package is importable now, but recent logs still show an older missing-package error. Restart gateway to reload the adapter.",
+                    action: .restartGateway
+                ))
+            } else if importStatus == true {
+                checks.append(PlatformDependencyCheck(
+                    id: "feishu-lark-oapi-ok",
+                    status: .ok,
+                    title: "lark-oapi package",
+                    detail: "The selected Hermes Python environment can import lark_oapi.",
+                    action: nil
+                ))
+            } else if logSaysMissing {
+                checks.append(PlatformDependencyCheck(
+                    id: "feishu-python-unknown",
+                    status: .blocker,
+                    title: "Cannot verify Feishu Python dependency",
+                    detail: "HermesStation could not find the Hermes Python executable, and recent logs show lark-oapi is missing.",
+                    action: nil
+                ))
+            }
+
+        case "email":
+            let configText = [
+                instance.configs["EMAIL_ADDRESS"],
+                instance.configs["EMAIL_USER"],
+                instance.configs["EMAIL_USERNAME"],
+                instance.configs["EMAIL_IMAP_HOST"],
+                instance.configs["EMAIL_SMTP_HOST"],
+            ]
+            .compactMap { $0?.lowercased() }
+            .joined(separator: "\n")
+            let isNeteaseMail = configText.contains("163.com") || configText.contains("188.com")
+            let imapIDPolicy = (instance.configs["EMAIL_IMAP_SEND_ID"] ?? "auto").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let smtpSecurity = (instance.configs["EMAIL_SMTP_SECURITY"] ?? "auto").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let smtpPort = (instance.configs["EMAIL_SMTP_PORT"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let unsafeLogin = context.contains("unsafe login")
+                || context.contains("login is unsafe")
+                || context.contains("unsafe authentication")
+            let inboxSelectFailure = context.contains("could not select inbox")
+
+            if unsafeLogin {
+                checks.append(PlatformDependencyCheck(
+                    id: "email-unsafe-login",
+                    status: .blocker,
+                    title: "Mailbox Unsafe Login",
+                    detail: "The 163/188 mailbox provider rejected the login as unsafe. Enable IMAP/SMTP authorization or app-specific password in the mailbox security settings, then restart gateway.",
+                    action: .openGatewayLog
+                ))
+            } else if inboxSelectFailure {
+                checks.append(PlatformDependencyCheck(
+                    id: "email-inbox-select-failed",
+                    status: .blocker,
+                    title: "INBOX selection failed",
+                    detail: "IMAP authentication succeeded, but the provider refused selecting INBOX. Check mailbox security settings and IMAP authorization before changing Hermes config.",
+                    action: .openGatewayLog
+                ))
+            } else if isNeteaseMail {
+                checks.append(PlatformDependencyCheck(
+                    id: "email-netease-warning",
+                    status: .info,
+                    title: "163/188 security mode",
+                    detail: "This mailbox family often requires IMAP/SMTP service to be enabled and an authorization code instead of the account password.",
+                    action: nil
+                ))
+
+                if imapIDPolicy == "never" {
+                    checks.append(PlatformDependencyCheck(
+                        id: "email-netease-imap-id-disabled",
+                        status: .warning,
+                        title: "IMAP ID is disabled",
+                        detail: "163/188 may reject INBOX access unless the client sends IMAP ID after LOGIN. Set EMAIL_IMAP_SEND_ID to auto or always.",
+                        action: .openEnvFile
+                    ))
+                } else {
+                    checks.append(PlatformDependencyCheck(
+                        id: "email-netease-imap-id-ok",
+                        status: .ok,
+                        title: "IMAP ID policy",
+                        detail: "EMAIL_IMAP_SEND_ID is \(imapIDPolicy.isEmpty ? "auto" : imapIDPolicy), which allows Hermes to send IMAP ID for 163/188.",
+                        action: nil
+                    ))
+                }
+
+                if smtpPort == "465" && !(smtpSecurity == "auto" || smtpSecurity == "ssl") {
+                    checks.append(PlatformDependencyCheck(
+                        id: "email-netease-smtp-security-mismatch",
+                        status: .warning,
+                        title: "SMTP security mismatches port 465",
+                        detail: "Port 465 should usually use SSL, not STARTTLS. Set EMAIL_SMTP_SECURITY to auto or ssl.",
+                        action: .openEnvFile
+                    ))
+                } else {
+                    checks.append(PlatformDependencyCheck(
+                        id: "email-netease-smtp-security-ok",
+                        status: .ok,
+                        title: "SMTP security mode",
+                        detail: "EMAIL_SMTP_SECURITY is \(smtpSecurity.isEmpty ? "auto" : smtpSecurity). Port \(smtpPort.isEmpty ? "?" : smtpPort) will use the matching SMTP transport.",
+                        action: nil
+                    ))
+                }
+            }
+
+            if context.contains("email_address, email_password") {
+                checks.append(PlatformDependencyCheck(
+                    id: "email-runtime-env-missing",
+                    status: .warning,
+                    title: "Gateway has stale EMAIL env",
+                    detail: "Hermes config contains email fields, but the running gateway still reports missing EMAIL_* values. Re-save config and restart gateway.",
+                    action: .restartGateway
+                ))
+            }
+
+        default:
+            break
+        }
+
+        if runtimeState == nil {
+            checks.append(PlatformDependencyCheck(
+                id: "\(instance.platformID)-runtime-missing",
+                status: .warning,
+                title: "Runtime adapter not loaded",
+                detail: "The platform is configured, but the current gateway runtime has not loaded this adapter yet.",
+                action: .restartGateway
+            ))
+        } else if checks.isEmpty && runtimeState?.state == "connected" {
+            checks.append(PlatformDependencyCheck(
+                id: "\(instance.platformID)-dependencies-ok",
+                status: .ok,
+                title: "No dependency blockers detected",
+                detail: "HermesStation did not detect a known dependency or account-security blocker for this connected platform.",
+                action: nil
+            ))
+        }
+
+        return uniquedPlatformDependencyChecks(checks)
+    }
+
+    private static func checkHermesPythonImport(_ importName: String, settings: AppSettings) async -> Bool? {
+        let python = HermesPaths(settings: settings).pythonExecutable
+        guard FileManager.default.isExecutableFile(atPath: python.path) else {
+            return nil
+        }
+        guard let result = try? await CommandRunner.run(python.path, ["-c", "import \(importName)"]) else {
+            return nil
+        }
+        return result.status == 0
+    }
+
+    private static func uniquedPlatformDependencyChecks(_ checks: [PlatformDependencyCheck]) -> [PlatformDependencyCheck] {
+        var seen = Set<String>()
+        return checks.filter { check in
+            if seen.contains(check.id) {
+                return false
+            }
+            seen.insert(check.id)
+            return true
+        }
     }
 
     private func platformWizardFieldRow(_ field: PlatformConfigField) -> some View {
@@ -2174,20 +2801,36 @@ struct SettingsView: View {
         guard let instance = selectedPlatformInstance else {
             platformDiagnosticSummary = nil
             platformDiagnosticLines = []
+            platformDependencyChecks = []
+            isCheckingPlatformDependencies = false
             return
         }
 
         let runtimeState = gatewayStore.snapshot.runtime?.platforms[instance.platformID]
         let paths = HermesPaths(settings: settingsStore.settings)
+        let settings = settingsStore.settings
         let platformID = instance.platformID
         let summary = platformDiagnosticSummaryText(for: instance, runtimeState: runtimeState)
+        isCheckingPlatformDependencies = true
 
         Task(priority: .utility) {
             let lines = Self.loadPlatformDiagnosticLines(platformID: platformID, paths: paths)
+            let dependencyChecks = await Self.loadPlatformDependencyChecks(
+                for: instance,
+                runtimeState: runtimeState,
+                summary: summary,
+                logLines: lines,
+                settings: settings
+            )
             await MainActor.run {
-                guard selectedPlatformInstanceID == platformID else { return }
+                guard selectedPlatformInstanceID == platformID else {
+                    isCheckingPlatformDependencies = false
+                    return
+                }
                 platformDiagnosticSummary = summary
                 platformDiagnosticLines = lines
+                platformDependencyChecks = dependencyChecks
+                isCheckingPlatformDependencies = false
             }
         }
     }
@@ -2196,7 +2839,7 @@ struct SettingsView: View {
         if !instance.isEnabled {
             return "Configuration incomplete. Fill all required fields before the gateway can load this platform."
         }
-        guard gatewayStore.snapshot.serviceLoaded else {
+        guard gatewayStore.snapshot.authoritativeGatewayPID != nil || gatewayStore.snapshot.runtime?.gatewayState == "running" else {
             return "Gateway service is not running. Start or restart it after saving platform config."
         }
         if gatewayStore.snapshot.runtimeIsStale {
@@ -2314,6 +2957,56 @@ struct SettingsView: View {
         showAddPlatformWizard = true
     }
 
+    private var canApplyNeteaseEmailPreset: Bool {
+        guard let instance = selectedPlatformInstance, instance.platformID == "email" else { return false }
+        let host = (platformConfigDrafts["EMAIL_IMAP_HOST"] ?? instance.configs["EMAIL_IMAP_HOST"] ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return host.contains("163.com") || host.contains("188.com")
+    }
+
+    private func applyNeteaseEmailPreset() {
+        guard canApplyNeteaseEmailPreset else { return }
+        isSavingPlatforms = true
+        platformStatusMessage = nil
+
+        var mergedDrafts = platformConfigDrafts
+        if (mergedDrafts["EMAIL_SMTP_PORT"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            mergedDrafts["EMAIL_SMTP_PORT"] = "465"
+        }
+        if (mergedDrafts["EMAIL_IMAP_PORT"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            mergedDrafts["EMAIL_IMAP_PORT"] = "993"
+        }
+        mergedDrafts["EMAIL_IMAP_SEND_ID"] = "always"
+        mergedDrafts["EMAIL_IMAP_ID_NAME"] = (mergedDrafts["EMAIL_IMAP_ID_NAME"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "Hermes Agent"
+            : mergedDrafts["EMAIL_IMAP_ID_NAME"]
+        mergedDrafts["EMAIL_IMAP_ID_VENDOR"] = (mergedDrafts["EMAIL_IMAP_ID_VENDOR"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "HermesStation"
+            : mergedDrafts["EMAIL_IMAP_ID_VENDOR"]
+        mergedDrafts["EMAIL_SMTP_SECURITY"] = "ssl"
+
+        Task {
+            let result = await runPlatformConfigCommands(mergedDrafts.sorted { $0.key < $1.key })
+            await MainActor.run {
+                switch result {
+                case .success:
+                    self.platformConfigDrafts = mergedDrafts
+                    if let instance = selectedPlatformInstance {
+                        self.platformDraftOverrides[instance.platformID] = mergedDrafts
+                    }
+                    self.refreshPlatformInstances()
+                    self.profileStore.load()
+                    self.gatewayStore.restartService()
+                    self.platformStatusMessage = "Applied 163/188 preset: IMAP ID enabled, SMTP 465 forced to SSL, gateway restarting."
+                case .failure(let error):
+                    self.platformStatusMessage = "Failed to apply 163/188 preset: \(error.localizedDescription)"
+                }
+                self.isSavingPlatforms = false
+            }
+        }
+    }
+
     private func savePlatformConfig() {
         guard selectedPlatformInstance != nil else { return }
         isSavingPlatforms = true
@@ -2413,11 +3106,16 @@ struct SettingsView: View {
 
     private var environmentTab: some View {
         Form {
+            hermesManagementSection
+
             Section("配置文件") {
                 pathRow("config.yaml", path: profileStore.snapshot.configURL.path, action: profileStore.openConfigFile)
                 pathRow(".env", path: profileStore.snapshot.envURL.path, action: profileStore.openEnvFile)
                 pathRow("SOUL.md", path: profileStore.snapshot.soulURL.path, action: profileStore.openSoulFile)
                 pathRow("auth.json", path: HermesPaths(settings: settingsStore.settings).authStore.path, action: gatewayStore.openAuthStore)
+                pathRow("session_model_overrides.json", path: HermesPaths(settings: settingsStore.settings).sessionModelOverridesURL.path) {
+                    openPath(HermesPaths(settings: settingsStore.settings).sessionModelOverridesURL)
+                }
                 if let latestDump = gatewayStore.snapshot.endpointTransparency?.latestRequestDump {
                     pathRow("latest request_dump", path: latestDump.fileURL.path, action: gatewayStore.openLatestRequestDump)
                 }
@@ -2433,6 +3131,7 @@ struct SettingsView: View {
                     Button("Hermes Config") { profileStore.openConfigFile() }
                     Button("Open Workspace") { gatewayStore.openWorkspace() }
                     Button("Open Hermes Home") { gatewayStore.openHermesHome() }
+                    Button("Open Hermes Root") { gatewayStore.openHermesRoot() }
                 }
             }
 
@@ -2446,6 +3145,20 @@ struct SettingsView: View {
 
                 labeledField("MESSAGING_CWD", text: $hermesDraft.messagingCwd)
                 mappingHint(".env → MESSAGING_CWD")
+
+                if !hermesDraft.messagingCwd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    HStack {
+                        Button("Migrate MESSAGING_CWD") {
+                            profileStore.migrateMessagingCwdToTerminalCwd(restartGateway: true)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(profileStore.isSaving)
+
+                        Text("Move the legacy `.env` working directory into `terminal.cwd`, clear the deprecated env var, and restart gateway.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
 
             hermesNotesSection
@@ -2467,6 +3180,193 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
+    }
+
+    private var hermesManagementSection: some View {
+        Section("Hermes Management") {
+            let alignment = gatewayStore.snapshot.profileAlignment
+            let expected = alignment?.expectedProfile ?? settingsStore.settings.profileName
+            let sticky = alignment?.stickyDisplayName ?? "unknown"
+            let isAligned = alignment?.isAligned ?? false
+
+            HStack(spacing: 8) {
+                summaryPill(title: "App profile", value: expected.isEmpty ? "unset" : expected)
+                summaryPill(title: "CLI default", value: sticky)
+                summaryPill(title: "Gateway", value: gatewayStore.snapshot.runtime?.gatewayState ?? gatewayStore.snapshot.serviceStatus.rawValue)
+                summaryPill(title: "launchd", value: gatewayStore.snapshot.serviceLoaded ? "loaded" : "not loaded")
+            }
+
+            if !isAligned {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Hermes CLI default profile does not match this HermesStation profile.")
+                            .font(.system(size: 12, weight: .medium))
+                        Text("Bare `hermes ...` commands may manage \(sticky) while HermesStation is editing \(expected).")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Use \(expected)") {
+                        gatewayStore.useCurrentHermesProfile()
+                    }
+                    .disabled(gatewayStore.isBusy || expected.isEmpty)
+                }
+                .padding(10)
+                .background(Color.orange.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+
+            if let alignment {
+                managementPathRow("Hermes root", alignment.hermesRootPath)
+                managementPathRow("Profile home", alignment.profileHomePath)
+            }
+
+            HStack {
+                Button("Doctor --fix") {
+                    gatewayStore.runDoctorFix()
+                }
+                .disabled(gatewayStore.isBusy)
+
+                Button("Use This Profile") {
+                    gatewayStore.useCurrentHermesProfile()
+                }
+                .disabled(gatewayStore.isBusy || expected.isEmpty)
+
+                Button("Restart Gateway") {
+                    gatewayStore.restartService()
+                }
+                .disabled(gatewayStore.isBusy)
+            }
+
+            if let report = gatewayStore.snapshot.doctorReport {
+                doctorReportView(report)
+            }
+
+            Text("When an upgrade changes Hermes behavior, align the CLI profile first, then run Doctor --fix, then restart gateway.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func doctorReportView(_ report: HermesDoctorReport) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: doctorStatusIcon(report.status))
+                    .foregroundStyle(doctorStatusColor(report.status))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Doctor Results")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text("Last run: \(doctorRunDateText(report.ranAt))")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                statusBadge(doctorStatusLabel(report.status), color: doctorStatusColor(report.status))
+                if report.fixedCount > 0 {
+                    statusBadge("fixed \(report.fixedCount)", color: .green)
+                }
+                if report.issueCount > 0 {
+                    statusBadge("issues \(report.issueCount)", color: .orange)
+                }
+            }
+
+            Text(report.summary)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            let checks = Array(report.keyChecks.prefix(8))
+            if !checks.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(checks) { check in
+                        doctorCheckRow(check)
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .background(doctorStatusColor(report.status).opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func doctorCheckRow(_ check: HermesDoctorCheck) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: doctorCheckIcon(check.state))
+                .foregroundStyle(doctorCheckColor(check.state))
+                .frame(width: 16)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(check.title)
+                    .font(.system(size: 11, weight: .medium))
+                HStack(spacing: 6) {
+                    Text(check.section)
+                    if let detail = check.detail, !detail.isEmpty {
+                        Text(detail)
+                    }
+                }
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(8)
+        .background(Color.secondary.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func doctorStatusLabel(_ status: HermesDoctorReportStatus) -> String {
+        switch status {
+        case .clean: return "clean"
+        case .fixed: return "fixed"
+        case .needsAttention: return "needs attention"
+        case .failed: return "failed"
+        case .unknown: return "unknown"
+        }
+    }
+
+    private func doctorStatusIcon(_ status: HermesDoctorReportStatus) -> String {
+        switch status {
+        case .clean, .fixed: return "checkmark.circle.fill"
+        case .needsAttention: return "exclamationmark.triangle.fill"
+        case .failed: return "xmark.octagon.fill"
+        case .unknown: return "questionmark.circle"
+        }
+    }
+
+    private func doctorStatusColor(_ status: HermesDoctorReportStatus) -> Color {
+        switch status {
+        case .clean, .fixed: return .green
+        case .needsAttention: return .orange
+        case .failed: return .red
+        case .unknown: return .secondary
+        }
+    }
+
+    private func doctorCheckIcon(_ state: HermesDoctorCheckState) -> String {
+        switch state {
+        case .ok, .fixed: return "checkmark.circle.fill"
+        case .warning: return "exclamationmark.triangle.fill"
+        case .failure: return "xmark.octagon.fill"
+        case .info: return "info.circle.fill"
+        }
+    }
+
+    private func doctorCheckColor(_ state: HermesDoctorCheckState) -> Color {
+        switch state {
+        case .ok, .fixed: return .green
+        case .warning: return .orange
+        case .failure: return .red
+        case .info: return .blue
+        }
+    }
+
+    private func doctorRunDateText(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .medium
+        return formatter.string(from: date)
     }
 
     // MARK: - Shared
@@ -2967,6 +3867,409 @@ struct SettingsView: View {
         return paths.launchAgentLabel
     }
 
+    private var stationGridColumns: [GridItem] {
+        [GridItem(.adaptive(minimum: 280), spacing: 12, alignment: .top)]
+    }
+
+    private var stationIconColor: Color {
+        switch gatewayStore.snapshot.serviceStatus {
+        case .running:
+            return .green
+        case .degraded:
+            return .orange
+        case .stopped:
+            return .red
+        case .unknown:
+            return .secondary
+        }
+    }
+
+    private var gatewayRuntimeHeadline: String {
+        if gatewayStore.snapshot.runtimeIsStale {
+            return "stale runtime"
+        }
+        if let state = gatewayStore.snapshot.runtime?.gatewayState, !state.isEmpty {
+            return state
+        }
+        return gatewayStore.snapshot.serviceStatus.rawValue
+    }
+
+    private var connectedPlatformCount: Int {
+        platformInstancesCache.filter { instance in
+            gatewayStore.snapshot.runtime?.platforms[instance.platformID]?.state == "connected"
+        }.count
+    }
+
+    private var configuredPlatformCount: Int {
+        platformInstancesCache.filter(\.isEnabled).count
+    }
+
+    private var profileOverviews: [HermesProfileOverview] {
+        settingsStore.profiles.map(profileOverview(for:))
+    }
+
+    private func profileOverview(for settings: AppSettings) -> HermesProfileOverview {
+        let paths = HermesPaths(settings: settings)
+        let configValues = HermesProfileStore.parseConfigValues(from: paths.configURL)
+        let envValues = HermesProfileStore.parseEnvValues(from: paths.envURL)
+        let configuredPlatforms = PlatformDescriptorRegistry.discoverInstances(envValues: envValues, configValues: configValues)
+        let totalModelCount = settings.modelProviders.reduce(into: 0) { partial, provider in
+            partial += provider.models.count
+        }
+
+        return HermesProfileOverview(
+            id: settings.id,
+            settings: settings,
+            paths: paths,
+            configuredPlatforms: configuredPlatforms,
+            enabledPlatformCount: configuredPlatforms.filter(\.isEnabled).count,
+            totalModelCount: totalModelCount,
+            configExists: FileManager.default.fileExists(atPath: paths.configURL.path),
+            envExists: FileManager.default.fileExists(atPath: paths.envURL.path),
+            soulExists: FileManager.default.fileExists(atPath: paths.soulURL.path),
+            runtimeExists: FileManager.default.fileExists(atPath: paths.gatewayState.path)
+        )
+    }
+
+    private func stationInfoBanner(title: String, message: String, color: Color) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "info.circle.fill")
+                .foregroundStyle(color)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+                Text(message)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .background(color.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func stationLatestRequestDumpCard(_ dump: LatestRequestDumpSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text("Latest API Failure")
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer()
+                if let reason = dump.reason, !reason.isEmpty {
+                    statusBadge(reason, color: .orange)
+                }
+            }
+
+            if let model = dump.model, !model.isEmpty {
+                detailRowCompact("Model", model)
+            }
+            if let requestURL = dump.requestURL, !requestURL.isEmpty {
+                detailRowCompact("URL", requestURL)
+            } else if let requestBaseURL = dump.requestBaseURL, !requestBaseURL.isEmpty {
+                detailRowCompact("Base URL", requestBaseURL)
+            }
+            if let errorType = dump.errorType, !errorType.isEmpty {
+                detailRowCompact("Error", errorType)
+            }
+            if let errorMessage = dump.errorMessage, !errorMessage.isEmpty {
+                Text(errorMessage)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+
+            HStack {
+                Button("Open request_dump") {
+                    gatewayStore.openLatestRequestDump()
+                }
+                if canAdoptOfficialKimiCodingPlanRoute && isLikelyKimiCodingPlanError(dump) {
+                    Button("Adopt Official Route") {
+                        profileStore.adoptKimiCodingPlanOfficialRoute(restartGateway: true)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(profileStore.isSaving)
+                }
+                Button("Docs") {
+                    openKimiCodingPlanDocs()
+                }
+                Button("模型页") {
+                    selectedTab = .model
+                }
+                Button("环境页") {
+                    selectedTab = .environment
+                }
+            }
+        }
+        .padding(10)
+        .background(Color.orange.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func stationPlatformCard(_ instance: PlatformInstance) -> some View {
+        let runtimeState = gatewayStore.snapshot.runtime?.platforms[instance.platformID]
+        let descriptor = PlatformDescriptorRegistry.descriptor(for: instance.platformID)
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 8) {
+                Image(systemName: descriptor?.icon ?? "network")
+                    .foregroundStyle(platformColor(runtimeState?.state))
+                    .frame(width: 20)
+                Text(instance.displayName)
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+                statusBadge(stationPlatformStatusText(instance, runtimeState: runtimeState), color: stationPlatformStatusColor(instance, runtimeState: runtimeState))
+            }
+
+            if let note = stationPlatformSpotlight(instance, runtimeState: runtimeState) {
+                Text(note)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            detailRowCompact("Home", stationPlatformHome(instance))
+            detailRowCompact("Allowed", stationPlatformAllowlist(instance))
+            detailRowCompact("Transport", stationPlatformTransport(instance))
+
+            HStack {
+                Button("Manage") {
+                    selectedPlatformInstanceID = instance.id
+                    loadPlatformConfigDraft(for: instance)
+                    selectedTab = .platforms
+                }
+                .buttonStyle(.borderedProminent)
+
+                Button("Logs") {
+                    gatewayStore.openGatewayLog()
+                }
+            }
+        }
+        .padding(12)
+        .background(Color.secondary.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func stationProfileRow(_ overview: HermesProfileOverview) -> some View {
+        let isActive = overview.id == settingsStore.activeProfileID
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(profileSwitcherLabel(for: overview.settings))
+                        .font(.system(size: 13, weight: .semibold))
+                    Text(overview.paths.hermesHome.path)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .textSelection(.enabled)
+                }
+                Spacer()
+                if isActive {
+                    statusBadge("当前激活", color: .green)
+                } else {
+                    statusBadge("待切换", color: .secondary)
+                }
+            }
+
+            HStack(spacing: 8) {
+                summaryPill(title: "Platforms", value: "\(overview.enabledPlatformCount)/\(overview.configuredPlatforms.count)")
+                summaryPill(title: "Providers", value: "\(overview.settings.modelProviders.count)")
+                summaryPill(title: "Models", value: "\(overview.totalModelCount)")
+                summaryPill(title: "Runtime", value: overview.runtimeExists ? "present" : "missing")
+            }
+
+            HStack(spacing: 8) {
+                filePresenceBadge("config", exists: overview.configExists)
+                filePresenceBadge("env", exists: overview.envExists)
+                filePresenceBadge("soul", exists: overview.soulExists)
+            }
+
+            HStack {
+                if !isActive {
+                    Button("Switch Here") {
+                        settingsStore.activateProfile(overview.id)
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+
+                Button("Open Home") {
+                    openPath(overview.paths.hermesHome)
+                }
+
+                Button("Open Logs") {
+                    openPath(overview.paths.logsDir)
+                }
+            }
+        }
+        .padding(12)
+        .background(isActive ? Color.accentColor.opacity(0.08) : Color.secondary.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func stationPlatformStatusText(_ instance: PlatformInstance, runtimeState: RuntimePlatformState?) -> String {
+        if gatewayStore.snapshot.runtimeIsStale {
+            return "stale"
+        }
+        if let state = runtimeState?.state, !state.isEmpty {
+            return state
+        }
+        return instance.isEnabled ? "configured" : "partial"
+    }
+
+    private func stationPlatformStatusColor(_ instance: PlatformInstance, runtimeState: RuntimePlatformState?) -> Color {
+        if gatewayStore.snapshot.runtimeIsStale {
+            return .orange
+        }
+        if let state = runtimeState?.state {
+            return platformColor(state)
+        }
+        return instance.isEnabled ? .blue : .orange
+    }
+
+    private func stationPlatformHome(_ instance: PlatformInstance) -> String {
+        switch instance.platformID {
+        case "email":
+            return firstNonEmpty(instance.configs["EMAIL_HOME_ADDRESS"], instance.configs["EMAIL_ADDRESS"]) ?? "not set"
+        case "feishu":
+            return firstNonEmpty(instance.configs["FEISHU_HOME_CHANNEL"], instance.configs["FEISHU_HOME_CHANNEL_NAME"]) ?? "not set"
+        case "weixin":
+            return firstNonEmpty(instance.configs["WEIXIN_HOME_CHANNEL"], instance.configs["WEIXIN_HOME_CHANNEL_NAME"]) ?? "not set"
+        default:
+            return firstNonEmpty(
+                instance.configs["\(instance.platformID.uppercased())_HOME_CHANNEL"],
+                instance.configs["\(instance.platformID.uppercased())_HOME_CHANNEL_NAME"]
+            ) ?? "not set"
+        }
+    }
+
+    private func stationPlatformAllowlist(_ instance: PlatformInstance) -> String {
+        let keys: [String]
+        switch instance.platformID {
+        case "email":
+            keys = ["EMAIL_ALLOWED_USERS", "EMAIL_ALLOW_ALL_USERS"]
+        case "feishu":
+            keys = ["FEISHU_ALLOWED_USERS"]
+        case "weixin":
+            keys = ["WEIXIN_ALLOWED_USERS", "WEIXIN_ALLOW_ALL_USERS"]
+        default:
+            keys = [
+                "\(instance.platformID.uppercased())_ALLOWED_USERS",
+                "\(instance.platformID.uppercased())_ALLOW_ALL_USERS"
+            ]
+        }
+
+        if let allowAllKey = keys.first(where: { $0.hasSuffix("ALLOW_ALL_USERS") }),
+           instance.configs[allowAllKey]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "true" {
+            return "allow all"
+        }
+        if let allowlistKey = keys.first(where: { $0.hasSuffix("ALLOWED_USERS") }),
+           let raw = instance.configs[allowlistKey],
+           !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let count = raw.split(separator: ",").filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.count
+            return count == 0 ? "configured" : "\(count) entries"
+        }
+        return "not set"
+    }
+
+    private func stationPlatformTransport(_ instance: PlatformInstance) -> String {
+        switch instance.platformID {
+        case "email":
+            let imap = firstNonEmpty(instance.configs["EMAIL_IMAP_HOST"], instance.configs["EMAIL_ADDRESS"]) ?? "IMAP"
+            let smtp = firstNonEmpty(instance.configs["EMAIL_SMTP_HOST"], instance.configs["EMAIL_SMTP_PORT"]) ?? "SMTP"
+            let imapIDPolicy = firstNonEmpty(instance.configs["EMAIL_IMAP_SEND_ID"]) ?? "auto"
+            let smtpSecurity = firstNonEmpty(instance.configs["EMAIL_SMTP_SECURITY"]) ?? "auto"
+            return "\(imap) -> \(smtp) · id:\(imapIDPolicy) · smtp:\(smtpSecurity)"
+        case "feishu":
+            let mode = firstNonEmpty(instance.configs["FEISHU_CONNECTION_MODE"]) ?? "default"
+            if mode == "webhook" {
+                let host = firstNonEmpty(instance.configs["FEISHU_WEBHOOK_HOST"]) ?? "127.0.0.1"
+                let port = firstNonEmpty(instance.configs["FEISHU_WEBHOOK_PORT"]) ?? "8765"
+                let path = firstNonEmpty(instance.configs["FEISHU_WEBHOOK_PATH"]) ?? "/feishu/webhook"
+                return "webhook @ \(host):\(port)\(path)"
+            }
+            let domain = firstNonEmpty(instance.configs["FEISHU_DOMAIN"]) ?? "feishu"
+            return "\(mode) · \(domain)"
+        case "weixin":
+            return firstNonEmpty(instance.configs["WEIXIN_BASE_URL"], instance.configs["WEIXIN_DM_POLICY"]) ?? "default"
+        default:
+            return descriptorTransportFallback(for: instance)
+        }
+    }
+
+    private func descriptorTransportFallback(for instance: PlatformInstance) -> String {
+        if let descriptor = PlatformDescriptorRegistry.descriptor(for: instance.platformID) {
+            return descriptor.tokenVar
+        }
+        return "default"
+    }
+
+    private func stationPlatformSpotlight(_ instance: PlatformInstance, runtimeState: RuntimePlatformState?) -> String? {
+        if let errorMessage = runtimeState?.errorMessage, !errorMessage.isEmpty {
+            return errorMessage
+        }
+
+        switch instance.platformID {
+        case "email":
+            if !instance.isEnabled {
+                return "Email 需要 IMAP/SMTP 四件套齐全，配置好了以后再重启 gateway。"
+            }
+            if stationPlatformAllowlist(instance) == "not set" {
+                return "建议立刻补上允许发件人列表，不然邮箱入口会过于暴露。"
+            }
+            if let host = instance.configs["EMAIL_IMAP_HOST"]?.lowercased(),
+               (host.contains("163.com") || host.contains("188.com")) {
+                let imapIDPolicy = firstNonEmpty(instance.configs["EMAIL_IMAP_SEND_ID"]) ?? "auto"
+                let smtpSecurity = firstNonEmpty(instance.configs["EMAIL_SMTP_SECURITY"]) ?? "auto"
+                return "163/188 已启用专项兼容参数：IMAP ID=\(imapIDPolicy)，SMTP=\(smtpSecurity)。"
+            }
+            return "邮箱是最容易掉线的入口之一，优先检查授权码、IMAP/SMTP 主机和 home address。"
+        case "feishu":
+            if !instance.isEnabled {
+                return "Feishu 需要 App ID / Secret，connection mode 也要和实际部署方式一致。"
+            }
+            return "Feishu 出问题时，常见根因是 `lark-oapi` 缺失、App Secret 不一致，或者 websocket/webhook 模式选错。"
+        case "weixin":
+            return "Weixin 入口依赖账号侧稳定性，适合在这里集中看 token、home channel 和 group policy。"
+        default:
+            return nil
+        }
+    }
+
+    private func detailRowCompact(_ title: String, _ value: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(title)
+                .font(.system(size: 10, weight: .medium))
+                .frame(width: 52, alignment: .leading)
+            Text(value)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .textSelection(.enabled)
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func filePresenceBadge(_ name: String, exists: Bool) -> some View {
+        statusBadge(name, color: exists ? .green : .orange)
+    }
+
+    private func firstNonEmpty(_ values: String?...) -> String? {
+        for value in values {
+            guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
+                continue
+            }
+            return trimmed
+        }
+        return nil
+    }
+
+    private func openPath(_ url: URL) {
+        Task { _ = try? await CommandRunner.openPath(url) }
+    }
+
     private func labeledField(_ title: String, text: Binding<String>) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
@@ -2988,6 +4291,20 @@ struct SettingsView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
+        }
+    }
+
+    private func managementPathRow(_ title: String, _ path: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(title)
+                .font(.system(size: 12, weight: .medium))
+                .frame(width: 90, alignment: .leading)
+            Text(path)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .lineLimit(2)
+            Spacer(minLength: 0)
         }
     }
 
@@ -3130,7 +4447,7 @@ struct SettingsView: View {
         switch state {
         case "connected": return .green
         case "disconnected": return .red
-        case "connecting": return .orange
+        case "connecting", "retrying": return .orange
         default: return .secondary
         }
     }
@@ -3602,7 +4919,10 @@ struct SettingsView: View {
     }
 
     private var activeProviderTitle: String {
-        currentHermesProviderDescriptor?.displayName ?? "手动 Provider"
+        if SavedProviderConnection.isKimiCodingPlanAnthropicRoute(providerID: hermesDraft.provider, baseURL: hermesDraft.baseURL) {
+            return "Kimi Coding Plan"
+        }
+        return currentHermesProviderDescriptor?.displayName ?? "手动 Provider"
     }
 
     private var activeProviderSubtitle: String {
@@ -3610,7 +4930,52 @@ struct SettingsView: View {
         if providerID.isEmpty {
             return "还没有设置 provider ID。"
         }
+        if SavedProviderConnection.isKimiCodingPlanAnthropicRoute(providerID: providerID, baseURL: hermesDraft.baseURL) {
+            return "anthropic · 通过 https://api.kimi.com/coding/ 接入 Coding Plan"
+        }
         return currentHermesProviderDescriptor == nil ? providerID : "\(providerID) · 已接入 menubar 映射"
+    }
+
+    private var canAdoptOfficialKimiCodingPlanRoute: Bool {
+        if SavedProviderConnection.isKimiCodingPlanAnthropicRoute(providerID: hermesDraft.provider, baseURL: hermesDraft.baseURL) {
+            return false
+        }
+
+        let providerID = hermesDraft.provider.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let baseURL = hermesDraft.baseURL.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let modelName = hermesDraft.modelName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let apiKey = hermesDraft.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let looksLikeKimiCoding = providerID == "kimi-coding"
+            || baseURL.contains("api.kimi.com/coding")
+            || modelName == "kimi-for-coding"
+            || apiKey.hasPrefix("sk-kimi-")
+
+        return looksLikeKimiCoding
+    }
+
+    private func isLikelyKimiCodingPlanError(_ dump: LatestRequestDumpSnapshot) -> Bool {
+        let haystack = [
+            dump.requestURL ?? "",
+            dump.requestBaseURL ?? "",
+            dump.model ?? "",
+            dump.errorMessage ?? "",
+            hermesDraft.provider,
+            hermesDraft.baseURL
+        ]
+        .joined(separator: "\n")
+        .lowercased()
+
+        return haystack.contains("api.kimi.com/coding")
+            || haystack.contains("kimi-for-coding")
+            || haystack.contains("only 0.6 is allowed")
+            || haystack.contains("resource_not_found_error")
+    }
+
+    private func openKimiCodingPlanDocs() {
+        Task {
+            _ = try? await CommandRunner.openLocation(kimiCodingPlanDocsURL)
+        }
     }
 
     private func syncDrafts() {
@@ -3768,6 +5133,13 @@ struct SettingsView: View {
         let modelName = hermesDraft.modelName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !providerID.isEmpty, !modelName.isEmpty else { return }
 
+        let importedDisplayName: String
+        if SavedProviderConnection.isKimiCodingPlanAnthropicRoute(providerID: providerID, baseURL: hermesDraft.baseURL) {
+            importedDisplayName = "Kimi Coding Plan (Anthropic-compatible)"
+        } else {
+            importedDisplayName = currentHermesProviderDescriptor?.displayName ?? providerID
+        }
+
         if let existingProviderIndex = appDraft.modelProviders.firstIndex(where: {
             $0.providerID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == providerID.lowercased()
             && $0.baseURL.trimmingCharacters(in: .whitespacesAndNewlines) == hermesDraft.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3791,7 +5163,7 @@ struct SettingsView: View {
 
         let provider = SavedProviderConnection(
             id: UUID(),
-            displayName: currentHermesProviderDescriptor?.displayName ?? providerID,
+            displayName: importedDisplayName,
             providerID: providerID,
             baseURL: hermesDraft.baseURL,
             apiKey: hermesDraft.apiKey,
@@ -3967,8 +5339,13 @@ struct SettingsView: View {
             issues.append(.init(severity: .error, message: "Base URL 不是合法的 http/https 地址。"))
         }
 
-        if SavedProviderConnection.hasKimiCodingV1Issue(providerID: providerID, baseURL: baseURL) {
-            issues.append(.init(severity: .warning, message: "Kimi Coding endpoint 应为 `https://api.kimi.com/coding/v1`。当前 `.../coding` 会在 Hermes 运行时触发 404；保存时 menubar 会自动修正。"))
+        if SavedProviderConnection.isKimiCodingPlanAnthropicRoute(providerID: providerID, baseURL: baseURL) {
+            issues.append(.init(severity: .warning, message: "检测到 Kimi Coding Plan 官方兼容接法：`provider=anthropic` + `https://api.kimi.com/coding/`。Hermes 里这条链路比 OpenAI-compatible `/coding/v1` 更稳。"))
+        } else if HermesProviderDescriptor.resolve(providerID)?.id == "kimi-coding",
+                  baseURL.lowercased().contains("api.kimi.com/coding/v1") {
+            issues.append(.init(severity: .warning, message: "当前是 Kimi Coding Plan 的 OpenAI-compatible `/coding/v1` 路由。若遇到 temperature / tool-calling 报错，建议切到 `provider=anthropic` + `https://api.kimi.com/coding/`。"))
+        } else if SavedProviderConnection.hasKimiCodingV1Issue(providerID: providerID, baseURL: baseURL) {
+            issues.append(.init(severity: .warning, message: "Kimi OpenAI-compatible endpoint 会自动补成 `https://api.kimi.com/coding/v1`。"))
         }
 
         let authType = resolved?.authType ?? .apiKey

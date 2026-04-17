@@ -232,10 +232,19 @@ final class HermesProfileStore: ObservableObject {
     }
 
     func activate(provider: SavedProviderConnection, model: SavedModelEntry) {
+        let normalizedProviderID = provider.providerID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedBaseURL = provider.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedAPIKey = provider.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isKimiCodingPlan = (
+            HermesProviderDescriptor.resolve(normalizedProviderID)?.id == "kimi-coding"
+            && model.modelName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "kimi-for-coding"
+            && (normalizedAPIKey.hasPrefix("sk-kimi-") || normalizedBaseURL.lowercased().contains("api.kimi.com/coding"))
+        )
+
         let draft = HermesProfileDraft(
-            provider: provider.providerID,
+            provider: isKimiCodingPlan ? "anthropic" : provider.providerID,
             modelName: model.modelName,
-            baseURL: provider.baseURL,
+            baseURL: isKimiCodingPlan ? "https://api.kimi.com/coding/" : provider.baseURL,
             apiKey: provider.apiKey,
             terminalCwd: snapshot.draft.terminalCwd,
             messagingCwd: snapshot.draft.messagingCwd
@@ -323,6 +332,126 @@ final class HermesProfileStore: ObservableObject {
         Task { _ = try? await CommandRunner.openPath(snapshot.soulURL) }
     }
 
+    func migrateMessagingCwdToTerminalCwd(restartGateway: Bool = false) {
+        guard !isSaving else { return }
+
+        let currentDraft = snapshot.draft.normalized
+        let legacyMessagingCwd = currentDraft.messagingCwd.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !legacyMessagingCwd.isEmpty else {
+            lastSaveMessage = "当前没有检测到可迁移的 MESSAGING_CWD。"
+            return
+        }
+
+        isSaving = true
+        lastSaveMessage = nil
+        let settings = settingsStore.settings
+
+        Task {
+            defer { Task { @MainActor in self.isSaving = false } }
+            do {
+                let migratedDraft = HermesProfileDraft(
+                    provider: currentDraft.provider,
+                    modelName: currentDraft.modelName,
+                    baseURL: currentDraft.baseURL,
+                    apiKey: currentDraft.apiKey,
+                    terminalCwd: currentDraft.terminalCwd.isEmpty ? legacyMessagingCwd : currentDraft.terminalCwd,
+                    messagingCwd: ""
+                ).normalized
+
+                try await Self.apply(
+                    settings: settings,
+                    draft: migratedDraft,
+                    descriptor: HermesProviderDescriptor.resolve(migratedDraft.provider)
+                )
+
+                if restartGateway {
+                    let result = try await CommandRunner.runGateway(settings, ["restart"])
+                    guard result.status == 0 else {
+                        let message = result.combinedOutput.isEmpty ? "Gateway restart failed." : result.combinedOutput
+                        throw NSError(domain: "HermesProfileStore", code: Int(result.status), userInfo: [NSLocalizedDescriptionKey: message])
+                    }
+                }
+
+                await MainActor.run {
+                    self.snapshot = Self.loadSnapshot(settings: settings)
+                    self.lastSaveMessage = restartGateway
+                        ? "已将 MESSAGING_CWD 迁移到 terminal.cwd，并自动重启 gateway。"
+                        : "已将 MESSAGING_CWD 迁移到 terminal.cwd。"
+                }
+            } catch {
+                await MainActor.run {
+                    self.lastSaveMessage = "迁移 MESSAGING_CWD 失败：\(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    func adoptKimiCodingPlanOfficialRoute(restartGateway: Bool = true) {
+        guard !isSaving else { return }
+
+        isSaving = true
+        lastSaveMessage = nil
+        let settings = settingsStore.settings
+        let currentDraft = snapshot.draft.normalized
+        let envURL = snapshot.envURL
+
+        Task {
+            defer { Task { @MainActor in self.isSaving = false } }
+            do {
+                let envValues = Self.parseEnvValues(from: envURL)
+                let apiKey = [
+                    currentDraft.apiKey,
+                    envValues["ANTHROPIC_API_KEY"] ?? "",
+                    envValues["KIMI_API_KEY"] ?? ""
+                ]
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .first(where: { !$0.isEmpty }) ?? ""
+
+                guard !apiKey.isEmpty else {
+                    throw NSError(
+                        domain: "HermesProfileStore",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "找不到可复用的 Kimi Coding Plan API Key。请先确认 .env 里有 KIMI_API_KEY 或 ANTHROPIC_API_KEY。"]
+                    )
+                }
+
+                let repairedDraft = HermesProfileDraft(
+                    provider: "anthropic",
+                    modelName: currentDraft.modelName.isEmpty ? "kimi-for-coding" : currentDraft.modelName,
+                    baseURL: "https://api.kimi.com/coding/",
+                    apiKey: apiKey,
+                    terminalCwd: currentDraft.terminalCwd,
+                    messagingCwd: currentDraft.messagingCwd
+                ).normalized
+
+                try await Self.apply(
+                    settings: settings,
+                    draft: repairedDraft,
+                    descriptor: HermesProviderDescriptor.resolve("anthropic")
+                )
+
+                if restartGateway {
+                    let result = try await CommandRunner.runGateway(settings, ["restart"])
+                    guard result.status == 0 else {
+                        let message = result.combinedOutput.isEmpty ? "Gateway restart failed." : result.combinedOutput
+                        throw NSError(domain: "HermesProfileStore", code: Int(result.status), userInfo: [NSLocalizedDescriptionKey: message])
+                    }
+                }
+
+                await MainActor.run {
+                    self.snapshot = Self.loadSnapshot(settings: settings)
+                    self.lastSaveMessage = restartGateway
+                        ? "已切到 Kimi Coding Plan 官方兼容路由，并自动重启 gateway。"
+                        : "已切到 Kimi Coding Plan 官方兼容路由。"
+                }
+            } catch {
+                await MainActor.run {
+                    self.lastSaveMessage = "切换 Kimi Coding Plan 官方路由失败：\(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
     // MARK: - Model Health
 
     enum ModelHealthStatus: Equatable {
@@ -360,15 +489,26 @@ final class HermesProfileStore: ObservableObject {
         guard !model.isEmpty else { return .noModel }
         guard !baseURL.isEmpty, !apiKey.isEmpty else { return .unhealthy("缺少 base URL 或 API Key", nil) }
 
-        guard let url = Self.healthEndpointURL(provider: provider, baseURL: baseURL, path: "chat/completions") else {
+        let isThirdPartyAnthropic = Self.isThirdPartyAnthropicRoute(provider: provider, baseURL: baseURL)
+        let probePath = isThirdPartyAnthropic ? "messages" : "chat/completions"
+        guard let url = Self.healthEndpointURL(provider: provider, baseURL: baseURL, path: probePath) else {
             return .unhealthy("无效的 base URL", nil)
         }
 
-        let payload: [String: Any] = [
-            "model": model,
-            "messages": [["role": "user", "content": "hi"]],
-            "max_tokens": 1
-        ]
+        let payload: [String: Any]
+        if isThirdPartyAnthropic {
+            payload = [
+                "model": model,
+                "messages": [["role": "user", "content": "hi"]],
+                "max_tokens": 1
+            ]
+        } else {
+            payload = [
+                "model": model,
+                "messages": [["role": "user", "content": "hi"]],
+                "max_tokens": 1
+            ]
+        }
 
         guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
             return .unhealthy("请求构造失败", nil)
@@ -377,9 +517,14 @@ final class HermesProfileStore: ObservableObject {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        for (header, value) in Self.providerSpecificHeaders(provider: provider, baseURL: baseURL) {
-            request.setValue(value, forHTTPHeaderField: header)
+        if isThirdPartyAnthropic {
+            request.setValue(apiKey, forHTTPHeaderField: "X-Api-Key")
+            request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        } else {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            for (header, value) in Self.providerSpecificHeaders(provider: provider, baseURL: baseURL) {
+                request.setValue(value, forHTTPHeaderField: header)
+            }
         }
         request.httpBody = body
         request.timeoutInterval = 15
@@ -406,6 +551,10 @@ final class HermesProfileStore: ObservableObject {
                 if bodyString.contains("context") || bodyString.contains("too long") || bodyString.contains("length") || bodyString.contains("tokens") {
                     return .healthy
                 }
+                if isThirdPartyAnthropic,
+                   bodyString.contains("temperature") {
+                    return .healthy
+                }
                 if bodyString.contains("model") && (bodyString.contains("not exist") || bodyString.contains("not supported") || bodyString.contains("invalid")) {
                     return .unhealthy("模型不存在 (400)", 400)
                 }
@@ -426,6 +575,9 @@ final class HermesProfileStore: ObservableObject {
 
     nonisolated func fetchAvailableModels(provider: String, baseURL: String, apiKey: String) async -> [String] {
         guard !baseURL.isEmpty, !apiKey.isEmpty else { return [] }
+        if Self.isThirdPartyAnthropicRoute(provider: provider, baseURL: baseURL) {
+            return []
+        }
         guard let url = Self.healthEndpointURL(provider: provider, baseURL: baseURL, path: "models") else {
             return []
         }
@@ -457,7 +609,7 @@ final class HermesProfileStore: ObservableObject {
         let canonical = HermesProviderDescriptor.resolve(normalized)?.id ?? normalized
         switch canonical {
         case "kimi-coding", "kimi", "moonshot":
-            return "kimi-for-coding"
+            return "kimi-k1-6-coding"
         case "openrouter":
             return "openai/gpt-4o"
         case "anthropic":
@@ -576,6 +728,11 @@ final class HermesProfileStore: ObservableObject {
         if !provider.isEmpty, provider != "custom", descriptor == nil {
             notes.append("当前 provider 没有在 HermesStation 里做映射，面板只能展示，不能安全保存。")
         }
+        if SavedProviderConnection.isKimiCodingPlanAnthropicRoute(providerID: provider, baseURL: effectiveBaseURL) {
+            notes.append("检测到 Kimi Coding Plan 的 Anthropic-compatible 接法：`provider=anthropic` + `model.base_url=https://api.kimi.com/coding/`。这是当前验证通过的 Hermes 接法。")
+        } else if provider == "kimi-coding", effectiveBaseURL.lowercased().contains("api.kimi.com/coding/v1") {
+            notes.append("当前使用的是 Kimi Coding Plan 的 OpenAI-compatible 路由。若出现 temperature / tool-calling 兼容问题，优先切到 `anthropic + https://api.kimi.com/coding/`。")
+        }
 
         return HermesProfileSnapshot(
             configURL: configURL,
@@ -606,6 +763,11 @@ final class HermesProfileStore: ObservableObject {
         let normalizedBaseURL = SavedProviderConnection.normalizedBaseURL(providerID: provider, baseURL: baseURL)
         guard !normalizedBaseURL.isEmpty else { return nil }
 
+        if isThirdPartyAnthropicRoute(provider: provider, baseURL: normalizedBaseURL) {
+            let root = normalizedBaseURL.hasSuffix("/") ? String(normalizedBaseURL.dropLast()) : normalizedBaseURL
+            return URL(string: "\(root)/v1/\(path)")
+        }
+
         let prefix: String
         if normalizedBaseURL.lowercased().hasSuffix("/v1") {
             prefix = normalizedBaseURL
@@ -622,6 +784,16 @@ final class HermesProfileStore: ObservableObject {
             return ["User-Agent": "KimiCLI/1.30.0"]
         }
         return [:]
+    }
+
+    private nonisolated static func isThirdPartyAnthropicRoute(provider: String, baseURL: String) -> Bool {
+        let normalizedProvider = HermesProviderDescriptor.resolve(provider)?.id
+            ?? provider.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard normalizedProvider == "anthropic" else { return false }
+
+        let normalizedBaseURL = SavedProviderConnection.normalizedBaseURL(providerID: provider, baseURL: baseURL).lowercased()
+        guard !normalizedBaseURL.isEmpty else { return false }
+        return !normalizedBaseURL.contains("api.anthropic.com")
     }
 
     private static func apply(settings: AppSettings, draft: HermesProfileDraft, descriptor: HermesProviderDescriptor?) async throws {

@@ -66,6 +66,7 @@ struct SavedProviderConnection: Codable, Equatable, Identifiable {
     }
 
     private static let kimiCodingBaseURL = "https://api.kimi.com/coding/v1"
+    private static let kimiCodingAnthropicBaseURL = "https://api.kimi.com/coding"
 
     static func normalizedBaseURL(providerID: String, baseURL: String) -> String {
         let trimmedBaseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -83,6 +84,11 @@ struct SavedProviderConnection: Codable, Equatable, Identifiable {
         if normalizedProviderID == "kimi-coding",
            strippedBaseURL.caseInsensitiveCompare("https://api.kimi.com/coding") == .orderedSame {
             return kimiCodingBaseURL
+        }
+
+        if normalizedProviderID == "anthropic",
+           strippedBaseURL.caseInsensitiveCompare("https://api.kimi.com/coding/v1") == .orderedSame {
+            return kimiCodingAnthropicBaseURL
         }
 
         return strippedBaseURL
@@ -104,6 +110,24 @@ struct SavedProviderConnection: Codable, Equatable, Identifiable {
         }
 
         return strippedBaseURL.caseInsensitiveCompare("https://api.kimi.com/coding") == .orderedSame
+    }
+
+    static func isKimiCodingPlanAnthropicRoute(providerID: String, baseURL: String) -> Bool {
+        let normalizedProviderID = HermesProviderDescriptor.resolve(providerID)?.id
+            ?? providerID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard normalizedProviderID == "anthropic" else { return false }
+
+        let trimmedBaseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedBaseURL.isEmpty else { return false }
+
+        let strippedBaseURL: String
+        if trimmedBaseURL.hasSuffix("/") {
+            strippedBaseURL = String(trimmedBaseURL.dropLast())
+        } else {
+            strippedBaseURL = trimmedBaseURL
+        }
+
+        return strippedBaseURL.caseInsensitiveCompare(kimiCodingAnthropicBaseURL) == .orderedSame
     }
 }
 

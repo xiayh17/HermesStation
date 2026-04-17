@@ -130,6 +130,7 @@ struct EndpointTransparencySnapshot {
     let credentialPoolEntries: [CredentialPoolEntrySnapshot]
     let latestRequestDump: LatestRequestDumpSnapshot?
     let sourceRows: [EndpointSourceSnapshot]
+    let isThirdPartyAnthropicRoute: Bool
 
     var hasMismatch: Bool {
         sourceRows.contains(where: \.isMismatch)
@@ -150,6 +151,25 @@ struct HermesAliasScript: Identifiable, Equatable {
     let path: String
     let content: String
     let isStandard: Bool
+}
+
+struct HermesProfileAlignment: Equatable {
+    let expectedProfile: String
+    let stickyProfile: String?
+    let hermesRootPath: String
+    let profileHomePath: String
+
+    var isAligned: Bool {
+        let sticky = stickyProfile?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return sticky == expectedProfile || (expectedProfile == "default" && (sticky?.isEmpty ?? true))
+    }
+
+    var stickyDisplayName: String {
+        guard let stickyProfile, !stickyProfile.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return "default"
+        }
+        return stickyProfile
+    }
 }
 
 enum ServiceStatus: String {
@@ -182,6 +202,8 @@ struct GatewaySnapshot {
     var endpointTransparency: EndpointTransparencySnapshot?
     var releaseInfo: HermesReleaseInfo?
     var aliases: [HermesAliasScript]
+    var profileAlignment: HermesProfileAlignment?
+    var doctorReport: HermesDoctorReport?
     var sessions: SessionSummary
     var agentSessions: AgentSessionSummary
     var usage: ModelUsageSummary
@@ -201,6 +223,8 @@ struct GatewaySnapshot {
         endpointTransparency: nil,
         releaseInfo: nil,
         aliases: [],
+        profileAlignment: nil,
+        doctorReport: nil,
         sessions: SessionSummary(totalCount: 0, recent: []),
         agentSessions: .empty,
         usage: .empty,

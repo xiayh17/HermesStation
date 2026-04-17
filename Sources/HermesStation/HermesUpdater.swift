@@ -206,13 +206,15 @@ final class HermesUpdater: ObservableObject {
     }
 
     func fixGlobalHermesSymlink() async -> String? {
-        let expected = projectRoot.appending(path: "hermes-agent/venv/bin/hermes").path
+        let expected = settings.launcherPath
         let whichResult = try? await CommandRunner.run("/usr/bin/which", ["hermes"])
         let localBin = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".local/bin")
         let localLink = localBin.appending(path: "hermes").path
 
         if whichResult?.status != 0 {
-            // No global hermes in PATH; create symlink at ~/.local/bin/hermes
+            // No global hermes in PATH; create symlink at ~/.local/bin/hermes.
+            // Point to the wrapper, not the raw venv binary, so bare `hermes`
+            // inherits this installation's HERMES_HOME/profile root.
             try? FileManager.default.createDirectory(at: localBin, withIntermediateDirectories: true)
             let result = try? await CommandRunner.run("/bin/ln", ["-sf", expected, localLink])
             guard result?.status == 0 else { return "Failed to create symlink at \(localLink)" }

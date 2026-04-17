@@ -11,8 +11,12 @@ struct HermesPaths {
         URL(fileURLWithPath: settings.workspaceRootPath, isDirectory: true)
     }
 
+    var hermesRoot: URL {
+        projectRoot.appending(path: ".hermes-home", directoryHint: .isDirectory)
+    }
+
     var hermesHome: URL {
-        projectRoot.appending(path: ".hermes-home/profiles/\(settings.profileName)", directoryHint: .isDirectory)
+        hermesRoot.appending(path: "profiles/\(settings.profileName)", directoryHint: .isDirectory)
     }
 
     var configURL: URL {
@@ -29,6 +33,10 @@ struct HermesPaths {
 
     var launcher: URL {
         URL(fileURLWithPath: settings.launcherPath)
+    }
+
+    var pythonExecutable: URL {
+        launcher.deletingLastPathComponent().appending(path: "python")
     }
 
     var gatewayState: URL {
@@ -53,6 +61,10 @@ struct HermesPaths {
 
     var sessionsDir: URL {
         hermesHome.appending(path: "sessions", directoryHint: .isDirectory)
+    }
+
+    var sessionModelOverridesURL: URL {
+        sessionsDir.appending(path: "session_model_overrides.json")
     }
 
     var logsDir: URL {
