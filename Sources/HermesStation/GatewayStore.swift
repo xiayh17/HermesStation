@@ -6,6 +6,7 @@ import Combine
 final class GatewayStore: ObservableObject {
     @Published private(set) var snapshot: GatewaySnapshot = .empty
     @Published var isBusy: Bool = false
+    @Published var updater: HermesUpdater
 
     let settingsStore: SettingsStore
     let profileStore: HermesProfileStore
@@ -13,16 +14,29 @@ final class GatewayStore: ObservableObject {
     private var timer: Timer?
     private var refreshTask: Task<Void, Never>?
     private var cancellables: Set<AnyCancellable> = []
+    nonisolated(unsafe) private static var lastAutoRestartDate: Date?
 
     init(settingsStore: SettingsStore, profileStore: HermesProfileStore) {
         self.settingsStore = settingsStore
         self.profileStore = profileStore
+        self.updater = HermesUpdater(settings: settingsStore.settings)
+        bindUpdater()
         refresh()
         configureTimer()
         settingsStore.$settings
             .sink { [weak self] _ in
+                self?.updater = HermesUpdater(settings: settingsStore.settings)
+                self?.bindUpdater()
                 self?.configureTimer()
                 self?.refresh()
+            }
+            .store(in: &cancellables)
+    }
+
+    private func bindUpdater() {
+        updater.objectWillChange
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
             }
             .store(in: &cancellables)
     }
@@ -35,8 +49,23 @@ final class GatewayStore: ObservableObject {
         refreshTask = Task(priority: .utility) { [weak self] in
             let snapshot = await Self.makeSnapshot(settings: settings, previousOutput: previousOutput)
             guard !Task.isCancelled else { return }
-            self?.snapshot = snapshot
+            await MainActor.run {
+                self?.snapshot = snapshot
+                self?.performAutoRestartIfNeeded()
+            }
         }
+    }
+
+    private func performAutoRestartIfNeeded() {
+        guard snapshot.runtimeIsStale,
+              settingsStore.settings.autoRestartOnStaleRuntime else { return }
+        let minInterval: TimeInterval = 60
+        if let last = Self.lastAutoRestartDate, Date().timeIntervalSince(last) < minInterval {
+            return
+        }
+        Self.lastAutoRestartDate = Date()
+        snapshot.lastCommandOutput = "Runtime stale detected. Auto-restarting gateway..."
+        restartService()
     }
 
     func installService() {
@@ -141,6 +170,118 @@ final class GatewayStore: ObservableObject {
         Task { _ = try? await CommandRunner.openPath(paths.logsDir.appending(path: "gateway.error.log")) }
     }
 
+    func openAuthStore() {
+        Task { _ = try? await CommandRunner.openPath(paths.authStore) }
+    }
+
+    func openLatestRequestDump() {
+        guard let url = paths.latestRequestDumpURL() else {
+            snapshot.lastCommandOutput = "No request_dump JSON found in \(paths.sessionsDir.path)"
+            return
+        }
+        Task { _ = try? await CommandRunner.openPath(url) }
+    }
+
+    func syncCredentialPoolBaseURL(
+        providerID: String,
+        desiredBaseURL: String,
+        apiKey: String,
+        restartAfter: Bool = false
+    ) {
+        let trimmedProviderID = providerID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let trimmedBaseURL = desiredBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedProviderID.isEmpty, !trimmedBaseURL.isEmpty else {
+            snapshot.lastCommandOutput = "Missing provider or target base URL for auth pool sync."
+            return
+        }
+
+        do {
+            var root: [String: Any] = [:]
+            if FileManager.default.fileExists(atPath: paths.authStore.path),
+               let data = try? Data(contentsOf: paths.authStore),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                root = json
+            }
+
+            var credentialPool = root["credential_pool"] as? [String: Any] ?? [:]
+            var entries = credentialPool[trimmedProviderID] as? [[String: Any]] ?? []
+            let descriptor = HermesProviderDescriptor.resolve(trimmedProviderID)
+            let envVarCandidates = Set(descriptor?.apiKeyEnvVars ?? [])
+            let sourceCandidates = Set(envVarCandidates.map { "env:\($0)" })
+
+            var updated = false
+            var matchedEntry = false
+
+            for index in entries.indices {
+                let source = (entries[index]["source"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let label = (entries[index]["label"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let shouldUpdate = sourceCandidates.contains(source) || envVarCandidates.contains(label)
+                guard shouldUpdate else { continue }
+                matchedEntry = true
+
+                let currentBaseURL = (entries[index]["base_url"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if currentBaseURL != trimmedBaseURL {
+                    entries[index]["base_url"] = trimmedBaseURL
+                    updated = true
+                }
+                if let primaryEnvVar = descriptor?.primaryAPIKeyEnvVar {
+                    if label.isEmpty {
+                        entries[index]["label"] = primaryEnvVar
+                        updated = true
+                    }
+                    if source.isEmpty {
+                        entries[index]["source"] = "env:\(primaryEnvVar)"
+                        updated = true
+                    }
+                }
+                if !trimmedAPIKey.isEmpty && (entries[index]["access_token"] as? String ?? "").isEmpty {
+                    entries[index]["access_token"] = trimmedAPIKey
+                    updated = true
+                }
+            }
+
+            if !matchedEntry, let primaryEnvVar = descriptor?.primaryAPIKeyEnvVar, !trimmedAPIKey.isEmpty {
+                let nextPriority = entries.compactMap { $0["priority"] as? Int }.max().map { $0 + 1 } ?? 0
+                entries.append([
+                    "id": String(UUID().uuidString.prefix(6)).lowercased(),
+                    "label": primaryEnvVar,
+                    "auth_type": "api_key",
+                    "priority": nextPriority,
+                    "source": "env:\(primaryEnvVar)",
+                    "access_token": trimmedAPIKey,
+                    "base_url": trimmedBaseURL,
+                    "request_count": 0,
+                ])
+                updated = true
+            }
+
+            if !updated {
+                snapshot.lastCommandOutput = "Auth pool already matches \(trimmedBaseURL)."
+                if restartAfter {
+                    restartService()
+                }
+                refresh()
+                return
+            }
+
+            credentialPool[trimmedProviderID] = entries
+            root["version"] = root["version"] ?? 1
+            root["credential_pool"] = credentialPool
+            root["updated_at"] = ISO8601DateFormatter().string(from: Date())
+
+            let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: paths.authStore, options: .atomic)
+            snapshot.lastCommandOutput = "Synced auth.json credential_pool[\(trimmedProviderID)] -> \(trimmedBaseURL)."
+            refresh()
+            if restartAfter {
+                restartService()
+            }
+        } catch {
+            snapshot.lastCommandOutput = "Failed to sync auth.json: \(error.localizedDescription)"
+        }
+    }
+
     func openWorkspace() {
         let workspaceURL = profileStore.snapshot.workspaceURL ?? paths.workspaceRoot
         Task { _ = try? await CommandRunner.openPath(workspaceURL) }
@@ -148,6 +289,132 @@ final class GatewayStore: ObservableObject {
 
     func openHermesHome() {
         Task { _ = try? await CommandRunner.openPath(paths.hermesHome) }
+    }
+
+    func openLatestReleasePage() {
+        guard let url = snapshot.releaseInfo?.releaseURL else {
+            snapshot.lastCommandOutput = "No release URL available."
+            return
+        }
+        Task { _ = try? await CommandRunner.openPath(url) }
+    }
+
+    func runHermesUpdate() {
+        guard !isBusy else { return }
+        isBusy = true
+        Task {
+            defer {
+                Task { @MainActor in self.isBusy = false }
+            }
+            do {
+                let result = try await CommandRunner.runHermes(settingsStore.settings, ["update"])
+                await MainActor.run {
+                    self.snapshot.lastCommandOutput = result.combinedOutput.isEmpty ? "Hermes update completed." : result.combinedOutput
+                    self.refresh()
+                }
+            } catch {
+                await MainActor.run {
+                    self.snapshot.lastCommandOutput = "Update failed: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    func applyPreparedUpdate() {
+        guard !isBusy else { return }
+        isBusy = true
+        Task {
+            defer {
+                Task { @MainActor in self.isBusy = false }
+            }
+            let error = await updater.applyUpdate()
+            await MainActor.run {
+                if let error {
+                    self.snapshot.lastCommandOutput = error
+                } else {
+                    self.snapshot.lastCommandOutput = "Update applied and gateway restarted."
+                }
+                self.refresh()
+            }
+        }
+    }
+
+    func killGateway(pid: Int) {
+        guard pid > 0 else { return }
+        Task {
+            do {
+                let result = try await CommandRunner.run("/bin/kill", ["-9", "\(pid)"])
+                await MainActor.run {
+                    if result.status == 0 {
+                        self.snapshot.lastCommandOutput = "Killed gateway PID \(pid)."
+                    } else {
+                        self.snapshot.lastCommandOutput = "Failed to kill PID \(pid): \(result.combinedOutput)"
+                    }
+                    self.refresh()
+                }
+            } catch {
+                await MainActor.run {
+                    self.snapshot.lastCommandOutput = "Failed to kill PID \(pid): \(error.localizedDescription)"
+                    self.refresh()
+                }
+            }
+        }
+    }
+
+    func promoteToAuthoritative(pid: Int) {
+        guard pid > 0 else { return }
+        let url = paths.gatewayPID
+        do {
+            var json: [String: Any] = ["pid": pid, "kind": "hermes-gateway"]
+            if FileManager.default.fileExists(atPath: url.path),
+               let data = try? Data(contentsOf: url),
+               let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                json = existing
+                json["pid"] = pid
+            }
+            let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: url, options: .atomic)
+            snapshot.lastCommandOutput = "Promoted PID \(pid) to authoritative gateway."
+            refresh()
+        } catch {
+            snapshot.lastCommandOutput = "Failed to promote PID \(pid): \(error.localizedDescription)"
+        }
+    }
+
+    func killDuplicateGateways() {
+        let processes = snapshot.gatewayProcesses
+        guard processes.count > 1 else { return }
+        let keptPID = snapshot.authoritativeGatewayPID
+        let targets = processes.filter { $0.id != keptPID }.map(\.id)
+        guard !targets.isEmpty else { return }
+
+        Task {
+            var killed: [Int] = []
+            var failed: [Int] = []
+            for pid in targets {
+                do {
+                    let result = try await CommandRunner.run("/bin/kill", ["-9", "\(pid)"])
+                    if result.status == 0 {
+                        killed.append(pid)
+                    } else {
+                        failed.append(pid)
+                    }
+                } catch {
+                    failed.append(pid)
+                }
+            }
+            await MainActor.run {
+                var parts: [String] = []
+                if !killed.isEmpty {
+                    parts.append("Killed rogue gateway PIDs: \(killed.map(String.init).joined(separator: ", "))")
+                }
+                if !failed.isEmpty {
+                    parts.append("Failed to kill PIDs: \(failed.map(String.init).joined(separator: ", "))")
+                }
+                self.snapshot.lastCommandOutput = parts.joined(separator: "\n")
+                self.refresh()
+            }
+        }
     }
 
     func submitPendingAction(type: String, sessionKey: String) {
@@ -222,7 +489,11 @@ final class GatewayStore: ObservableObject {
         let paths = HermesPaths(settings: settings)
         let plistExists = FileManager.default.fileExists(atPath: paths.launchAgentPlist.path)
         let launchctlLoaded = await readLaunchdLoaded(label: paths.launchAgentLabel)
+        let launchdPID = await readLaunchdPID(label: paths.launchAgentLabel)
         let runtime = readRuntimeStatus(at: paths.gatewayState)
+        let pidFilePID = readGatewayPID(at: paths.gatewayPID)
+        let gatewayProcesses = await readGatewayProcesses(settings: settings, launchdPID: launchdPID)
+        let endpointTransparency = loadEndpointTransparency(paths: paths)
         let agentSessions = SQLiteSessionStore.loadAgents(from: paths.stateDB, paths: paths)
         let usage = SQLiteSessionStore.loadUsage(from: paths.stateDB)
         let sessions = SessionSummary(
@@ -232,25 +503,70 @@ final class GatewayStore: ObservableObject {
             }
         )
 
+        let duplicateGatewayPIDs = gatewayProcesses.map(\.id)
+        let authoritativeGatewayPID = resolveAuthoritativeGatewayPID(
+            launchdPID: launchdPID,
+            liveGatewayPIDs: duplicateGatewayPIDs,
+            pidFilePID: pidFilePID
+        )
+        let runtimeStaleReason = computeRuntimeStaleReason(
+            runtime: runtime,
+            authoritativeGatewayPID: authoritativeGatewayPID
+        )
+        let runtimeIsStale = runtimeStaleReason != nil
+
+        let enrichedProcesses = gatewayProcesses.map {
+            GatewayProcessInfo(
+                id: $0.id,
+                command: $0.command,
+                startTime: $0.startTime,
+                isLaunchdManaged: $0.isLaunchdManaged,
+                isAuthoritative: $0.id == authoritativeGatewayPID
+            )
+        }
+
         let serviceStatus: ServiceStatus
-        if launchctlLoaded && runtime != nil {
-            let states = runtime?.platforms.values.compactMap { $0.state } ?? []
+        if enrichedProcesses.count > 1 {
+            serviceStatus = .degraded
+        } else if authoritativeGatewayPID != nil {
+            let states = (runtimeIsStale ? nil : runtime)?.platforms.values.compactMap { $0.state } ?? []
             if states.contains(where: { $0 != "connected" }) {
                 serviceStatus = .degraded
             } else {
                 serviceStatus = .running
             }
+        } else if launchctlLoaded {
+            serviceStatus = .degraded
         } else if plistExists {
             serviceStatus = .stopped
         } else {
             serviceStatus = .unknown
         }
 
+        if settings.autoCleanupDuplicateGateways,
+           enrichedProcesses.count > 1,
+           let keptPID = authoritativeGatewayPID {
+            let targets = enrichedProcesses.filter { $0.id != keptPID }.map(\.id)
+            for pid in targets {
+                _ = try? await CommandRunner.run("/bin/kill", ["-9", "\(pid)"])
+            }
+        }
+
+        let releaseInfo = await loadReleaseInfo(settings: settings)
+
         return GatewaySnapshot(
             serviceInstalled: plistExists,
             serviceLoaded: launchctlLoaded,
             serviceStatus: serviceStatus,
             runtime: runtime,
+            authoritativeGatewayPID: authoritativeGatewayPID,
+            pidFilePID: pidFilePID,
+            runtimeIsStale: runtimeIsStale,
+            runtimeStaleReason: runtimeStaleReason,
+            duplicateGatewayPIDs: enrichedProcesses.map(\.id),
+            gatewayProcesses: enrichedProcesses,
+            endpointTransparency: endpointTransparency,
+            releaseInfo: releaseInfo,
             sessions: sessions,
             agentSessions: agentSessions,
             usage: usage,
@@ -258,9 +574,276 @@ final class GatewayStore: ObservableObject {
         )
     }
 
+    nonisolated private static func loadReleaseInfo(settings: AppSettings) async -> HermesReleaseInfo {
+        let current = await readInstalledHermesVersion(settings: settings)
+        let (release, error) = await fetchLatestHermesRelease()
+
+        if let release = release {
+            let currentTag = extractTag(from: current)
+            let latestTag = release.tagName
+            let isUpdate: Bool = {
+                guard let ct = currentTag else { return false }
+                return ct != latestTag
+            }()
+            return HermesReleaseInfo(
+                currentVersion: current,
+                currentTag: currentTag,
+                latestVersion: release.name ?? release.tagName,
+                latestTag: latestTag,
+                releaseURL: release.htmlUrl.flatMap { URL(string: $0) },
+                publishedAt: release.publishedAt,
+                body: release.body,
+                isUpdateAvailable: isUpdate,
+                fetchError: nil
+            )
+        } else {
+            return HermesReleaseInfo(
+                currentVersion: current,
+                currentTag: extractTag(from: current),
+                latestVersion: nil,
+                latestTag: nil,
+                releaseURL: nil,
+                publishedAt: nil,
+                body: nil,
+                isUpdateAvailable: false,
+                fetchError: error
+            )
+        }
+    }
+
+    nonisolated private static func readInstalledHermesVersion(settings: AppSettings) async -> String? {
+        guard let result = try? await CommandRunner.runHermes(settings, ["--version"]), result.status == 0 else {
+            return nil
+        }
+        let firstLine = result.stdout.split(separator: "\n").first.map(String.init) ?? result.stdout
+        return firstLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    nonisolated private static func fetchLatestHermesRelease() async -> (release: GitHubRelease?, error: String?) {
+        let url = URL(string: "https://api.github.com/repos/NousResearch/hermes-agent/releases/latest")!
+        var request = URLRequest(url: url)
+        request.setValue("HermesStation/1.0", forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 15
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                return (nil, "Invalid response from GitHub")
+            }
+            guard http.statusCode == 200 else {
+                return (nil, "GitHub HTTP \(http.statusCode)")
+            }
+            let release = try JSONDecoder().decode(GitHubRelease.self, from: data)
+            return (release, nil)
+        } catch let decodingError as DecodingError {
+            return (nil, "Decode error: \(decodingError.localizedDescription)")
+        } catch {
+            return (nil, "Network error: \(error.localizedDescription)")
+        }
+    }
+
+    nonisolated private static func extractTag(from versionLine: String?) -> String? {
+        guard let line = versionLine else { return nil }
+        // Match patterns like v2026.4.16 or v0.10.0 from strings like:
+        // "Hermes Agent v0.9.0 (2026.4.13)" or "v2026.4.16"
+        let pattern = #"v\d+(\.\d+)*"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []),
+              let match = regex.firstMatch(in: line, options: [], range: NSRange(line.startIndex..., in: line)) else {
+            return nil
+        }
+        if let range = Range(match.range, in: line) {
+            return String(line[range])
+        }
+        return nil
+    }
+
+    nonisolated private static func loadEndpointTransparency(paths: HermesPaths) -> EndpointTransparencySnapshot? {
+        let configValues = HermesProfileStore.parseConfigValues(from: paths.configURL)
+        let envValues = HermesProfileStore.parseEnvValues(from: paths.envURL)
+        let provider = configValues["model.provider"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let model = configValues["model.default"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? configValues["model.name"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? ""
+        guard !provider.isEmpty || !model.isEmpty else { return nil }
+
+        let descriptor = HermesProviderDescriptor.resolve(provider)
+        let configBaseURL = normalizedOptionalURL(configValues["model.base_url"])
+        let envBaseURLKey = descriptor?.baseURLEnvVar
+        let envBaseURL = normalizedOptionalURL(envBaseURLKey.flatMap { envValues[$0] })
+        let credentialPoolEntries = loadCredentialPoolEntries(from: paths.authStore, provider: provider)
+        let latestRequestDump = loadLatestRequestDump(from: paths.latestRequestDumpURL())
+
+        let canonical = canonicalSourceURL(
+            latestRequestBaseURL: latestRequestDump?.requestBaseURL,
+            credentialPoolEntries: credentialPoolEntries,
+            envBaseURL: envBaseURL,
+            configBaseURL: configBaseURL
+        )
+
+        let sourceRows: [EndpointSourceSnapshot] = [
+            EndpointSourceSnapshot(
+                label: "config.yaml → model.base_url",
+                value: configBaseURL,
+                detail: configBaseURL == nil ? "empty" : nil,
+                isMismatch: isMismatch(value: configBaseURL, canonical: canonical)
+            ),
+            EndpointSourceSnapshot(
+                label: envBaseURLKey.map { ".env → \($0)" } ?? ".env → provider base URL",
+                value: envBaseURL,
+                detail: envBaseURL == nil ? "unset" : nil,
+                isMismatch: isMismatch(value: envBaseURL, canonical: canonical)
+            ),
+            EndpointSourceSnapshot(
+                label: "auth.json → credential_pool",
+                value: normalizedOptionalURL(credentialPoolEntries.first?.baseURL),
+                detail: credentialPoolEntries.first.map { "\($0.label) • \($0.source ?? "unknown")" } ?? "no entry",
+                isMismatch: isMismatch(value: credentialPoolEntries.first?.baseURL, canonical: canonical)
+            ),
+            EndpointSourceSnapshot(
+                label: "latest request dump",
+                value: latestRequestDump?.requestURL,
+                detail: latestRequestDump.map {
+                    [$0.reason, $0.errorType].compactMap { $0 }.joined(separator: " • ")
+                },
+                isMismatch: isMismatch(value: latestRequestDump?.requestBaseURL, canonical: canonical)
+            ),
+        ]
+
+        return EndpointTransparencySnapshot(
+            provider: provider,
+            model: model,
+            configBaseURL: configBaseURL,
+            envBaseURLKey: envBaseURLKey,
+            envBaseURL: envBaseURL,
+            credentialPoolEntries: credentialPoolEntries,
+            latestRequestDump: latestRequestDump,
+            sourceRows: sourceRows
+        )
+    }
+
+    nonisolated private static func loadCredentialPoolEntries(from url: URL, provider: String) -> [CredentialPoolEntrySnapshot] {
+        guard FileManager.default.fileExists(atPath: url.path),
+              let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let pool = json["credential_pool"] as? [String: Any] else {
+            return []
+        }
+
+        let providerKey = provider.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard let entries = pool[providerKey] as? [[String: Any]] else { return [] }
+
+        return entries.compactMap { entry in
+            let id = (entry["id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let label = (entry["label"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let resolvedID = id, let resolvedLabel = label else { return nil }
+            return CredentialPoolEntrySnapshot(
+                id: resolvedID,
+                label: resolvedLabel,
+                source: entry["source"] as? String,
+                baseURL: normalizedOptionalURL(entry["base_url"] as? String),
+                requestCount: entry["request_count"] as? Int
+            )
+        }
+        .sorted { lhs, rhs in
+            let lhsCount = lhs.requestCount ?? .max
+            let rhsCount = rhs.requestCount ?? .max
+            if lhsCount == rhsCount {
+                return lhs.label < rhs.label
+            }
+            return lhsCount < rhsCount
+        }
+    }
+
+    nonisolated private static func loadLatestRequestDump(from url: URL?) -> LatestRequestDumpSnapshot? {
+        guard let url,
+              FileManager.default.fileExists(atPath: url.path),
+              let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+
+        let request = json["request"] as? [String: Any]
+        let body = request?["body"] as? [String: Any]
+        let response = json["response"] as? [String: Any]
+        let error = response?["error"] as? [String: Any]
+
+        return LatestRequestDumpSnapshot(
+            fileURL: url,
+            timestamp: json["timestamp"] as? String,
+            reason: json["reason"] as? String,
+            method: request?["method"] as? String,
+            requestURL: normalizedOptionalURL(request?["url"] as? String),
+            requestBaseURL: normalizedRequestBaseURL(request?["url"] as? String),
+            model: body?["model"] as? String,
+            errorType: error?["type"] as? String,
+            errorMessage: error?["message"] as? String
+        )
+    }
+
+    nonisolated private static func canonicalSourceURL(
+        latestRequestBaseURL: String?,
+        credentialPoolEntries: [CredentialPoolEntrySnapshot],
+        envBaseURL: String?,
+        configBaseURL: String?
+    ) -> String? {
+        if let latestRequestBaseURL {
+            return latestRequestBaseURL
+        }
+        if let poolURL = credentialPoolEntries.first?.baseURL {
+            return poolURL
+        }
+        if let envBaseURL {
+            return envBaseURL
+        }
+        return configBaseURL
+    }
+
+    nonisolated private static func normalizedOptionalURL(_ value: String?) -> String? {
+        guard var trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
+            return nil
+        }
+        while trimmed.hasSuffix("/") {
+            trimmed.removeLast()
+        }
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    nonisolated private static func normalizedRequestBaseURL(_ value: String?) -> String? {
+        guard var normalized = normalizedOptionalURL(value) else { return nil }
+        let knownSuffixes = [
+            "/chat/completions",
+            "/responses",
+            "/v1/messages",
+            "/messages",
+            "/models",
+        ]
+        for suffix in knownSuffixes where normalized.hasSuffix(suffix) {
+            normalized.removeLast(suffix.count)
+            return normalizedOptionalURL(normalized)
+        }
+        return normalized
+    }
+
+    nonisolated private static func isMismatch(value: String?, canonical: String?) -> Bool {
+        guard let canonical else { return false }
+        guard let normalized = normalizedOptionalURL(value) else { return false }
+        return normalized != canonical
+    }
+
     nonisolated private static func readRuntimeStatus(at url: URL) -> RuntimeStatus? {
         guard let data = try? Data(contentsOf: url) else { return nil }
         return try? JSONDecoder().decode(RuntimeStatus.self, from: data)
+    }
+
+    nonisolated private static func readGatewayPID(at url: URL) -> Int? {
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let pid = json["pid"] as? Int else {
+            if let text = try? String(contentsOf: url, encoding: .utf8) {
+                return Int(text.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+            return nil
+        }
+        return pid
     }
 
     nonisolated private static func readLaunchdLoaded(label: String) async -> Bool {
@@ -268,6 +851,96 @@ final class GatewayStore: ObservableObject {
             return result.status == 0
         }
         return false
+    }
+
+    nonisolated private static func readLaunchdPID(label: String) async -> Int? {
+        guard let result = try? await CommandRunner.runLaunchctl(["print", "gui/501/\(label)"]), result.status == 0 else {
+            return nil
+        }
+
+        for rawLine in result.combinedOutput.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = String(rawLine).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard line.hasPrefix("pid = ") else { continue }
+            return Int(line.replacingOccurrences(of: "pid = ", with: ""))
+        }
+        return nil
+    }
+
+    nonisolated private static func readGatewayProcesses(settings: AppSettings, launchdPID: Int?) async -> [GatewayProcessInfo] {
+        let profileID = settings.profileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !profileID.isEmpty else { return [] }
+        guard let result = try? await CommandRunner.run("/bin/ps", ["-ax", "-o", "pid=,etimes=,command="]), result.status == 0 else {
+            return []
+        }
+
+        return result.stdout
+            .split(separator: "\n")
+            .compactMap { rawLine -> GatewayProcessInfo? in
+                let line = String(rawLine)
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return nil }
+                let parts = trimmed.split(maxSplits: 2, whereSeparator: \.isWhitespace)
+                guard parts.count >= 2 else { return nil }
+                guard let pid = Int(parts[0]) else { return nil }
+                let etimesStr = String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines)
+                let command = parts.count > 2 ? String(parts[2]) : ""
+                let launchdPattern = "hermes_cli.main --profile \(profileID) gateway run"
+                let manualPattern = "bin/hermes -p \(profileID) gateway run"
+                guard command.contains(launchdPattern) || command.contains(manualPattern) else { return nil }
+                // Exclude rg/grep/zsh shells that happen to contain the pattern in their own arguments
+                guard !command.hasPrefix("rg "), !command.hasPrefix("grep "), !command.hasPrefix("/bin/zsh -c ") else { return nil }
+                let startTime: Date? = {
+                    guard let elapsed = Double(etimesStr), elapsed >= 0 else { return nil }
+                    return Date().addingTimeInterval(-elapsed)
+                }()
+                return GatewayProcessInfo(
+                    id: pid,
+                    command: command,
+                    startTime: startTime,
+                    isLaunchdManaged: pid == launchdPID,
+                    isAuthoritative: false // resolved later in makeSnapshot
+                )
+            }
+            .sorted { $0.id < $1.id }
+    }
+
+    nonisolated private static func resolveAuthoritativeGatewayPID(
+        launchdPID: Int?,
+        liveGatewayPIDs: [Int],
+        pidFilePID: Int?
+    ) -> Int? {
+        if let launchdPID, liveGatewayPIDs.contains(launchdPID) {
+            return launchdPID
+        }
+        if let pidFilePID, liveGatewayPIDs.contains(pidFilePID) {
+            return pidFilePID
+        }
+        if let launchdPID {
+            return launchdPID
+        }
+        if let pidFilePID {
+            return pidFilePID
+        }
+        if liveGatewayPIDs.count == 1 {
+            return liveGatewayPIDs.first
+        }
+        return nil
+    }
+
+    nonisolated private static func computeRuntimeStaleReason(
+        runtime: RuntimeStatus?,
+        authoritativeGatewayPID: Int?
+    ) -> String? {
+        guard let runtime else { return authoritativeGatewayPID == nil ? nil : "gateway_state.json missing" }
+        guard let authoritativeGatewayPID else { return nil }
+        if runtime.pid != authoritativeGatewayPID {
+            let runtimePID = runtime.pid.map(String.init) ?? "nil"
+            return "gateway_state.json pid=\(runtimePID), live pid=\(authoritativeGatewayPID)"
+        }
+        if runtime.gatewayState?.lowercased() != "running" {
+            return "gateway_state.json says \(runtime.gatewayState ?? "unknown") while process is alive"
+        }
+        return nil
     }
 
     private func createLogExcerpt(for sessionID: String) throws -> URL {

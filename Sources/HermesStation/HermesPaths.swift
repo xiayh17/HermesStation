@@ -47,6 +47,10 @@ struct HermesPaths {
         hermesHome.appending(path: "state.db")
     }
 
+    var authStore: URL {
+        hermesHome.appending(path: "auth.json")
+    }
+
     var sessionsDir: URL {
         hermesHome.appending(path: "sessions", directoryHint: .isDirectory)
     }
@@ -74,5 +78,24 @@ struct HermesPaths {
 
     func transcriptURL(for sessionID: String) -> URL {
         sessionsDir.appending(path: "session_\(sessionID).json")
+    }
+
+    func latestRequestDumpURL() -> URL? {
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: sessionsDir,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return nil
+        }
+
+        return contents
+            .filter { $0.lastPathComponent.hasPrefix("request_dump_") && $0.pathExtension == "json" }
+            .sorted {
+                let lhsDate = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let rhsDate = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return lhsDate > rhsDate
+            }
+            .first
     }
 }

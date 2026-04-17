@@ -115,6 +115,8 @@ struct AppSettings: Codable, Equatable, Identifiable {
     var workspaceRootPath: String
     var launcherPath: String
     var refreshIntervalSeconds: Double
+    var autoCleanupDuplicateGateways: Bool
+    var autoRestartOnStaleRuntime: Bool
     var modelProviders: [SavedProviderConnection]
 
     init(
@@ -125,6 +127,8 @@ struct AppSettings: Codable, Equatable, Identifiable {
         workspaceRootPath: String,
         launcherPath: String,
         refreshIntervalSeconds: Double,
+        autoCleanupDuplicateGateways: Bool = true,
+        autoRestartOnStaleRuntime: Bool = true,
         modelProviders: [SavedProviderConnection] = []
     ) {
         self.id = id
@@ -134,6 +138,8 @@ struct AppSettings: Codable, Equatable, Identifiable {
         self.workspaceRootPath = workspaceRootPath
         self.launcherPath = launcherPath
         self.refreshIntervalSeconds = refreshIntervalSeconds
+        self.autoCleanupDuplicateGateways = autoCleanupDuplicateGateways
+        self.autoRestartOnStaleRuntime = autoRestartOnStaleRuntime
         self.modelProviders = modelProviders
     }
 
@@ -146,6 +152,8 @@ struct AppSettings: Codable, Equatable, Identifiable {
         workspaceRootPath = try container.decodeIfPresent(String.self, forKey: .workspaceRootPath) ?? ""
         launcherPath = try container.decodeIfPresent(String.self, forKey: .launcherPath) ?? ""
         refreshIntervalSeconds = try container.decodeIfPresent(Double.self, forKey: .refreshIntervalSeconds) ?? 5
+        autoCleanupDuplicateGateways = try container.decodeIfPresent(Bool.self, forKey: .autoCleanupDuplicateGateways) ?? true
+        autoRestartOnStaleRuntime = try container.decodeIfPresent(Bool.self, forKey: .autoRestartOnStaleRuntime) ?? true
         modelProviders = try container.decodeIfPresent([SavedProviderConnection].self, forKey: .modelProviders) ?? []
     }
 
@@ -157,6 +165,8 @@ struct AppSettings: Codable, Equatable, Identifiable {
         workspaceRootPath: "/Users/xiayh/Documents/hermers_workspace",
         launcherPath: "/Users/xiayh/Projects/install_hermers/run-hermes-local.sh",
         refreshIntervalSeconds: 5,
+        autoCleanupDuplicateGateways: true,
+        autoRestartOnStaleRuntime: true,
         modelProviders: []
     )
 
@@ -169,6 +179,8 @@ struct AppSettings: Codable, Equatable, Identifiable {
             workspaceRootPath: "",
             launcherPath: "",
             refreshIntervalSeconds: 5,
+            autoCleanupDuplicateGateways: true,
+            autoRestartOnStaleRuntime: true,
             modelProviders: []
         )
     }
