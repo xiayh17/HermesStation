@@ -58,6 +58,88 @@ struct RuntimeStatus: Decodable {
     }
 }
 
+struct HermesReleaseInfo {
+    let currentVersion: String?
+    let currentTag: String?
+    let latestVersion: String?
+    let latestTag: String?
+    let releaseURL: URL?
+    let publishedAt: String?
+    let body: String?
+    let isUpdateAvailable: Bool
+    let fetchError: String?
+}
+
+struct GitHubRelease: Decodable {
+    let tagName: String
+    let name: String?
+    let htmlUrl: String?
+    let publishedAt: String?
+    let body: String?
+    let prerelease: Bool
+    let draft: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case tagName = "tag_name"
+        case name
+        case htmlUrl = "html_url"
+        case publishedAt = "published_at"
+        case body
+        case prerelease
+        case draft
+    }
+}
+
+struct EndpointSourceSnapshot {
+    let label: String
+    let value: String?
+    let detail: String?
+    let isMismatch: Bool
+}
+
+struct CredentialPoolEntrySnapshot: Identifiable {
+    let id: String
+    let label: String
+    let source: String?
+    let baseURL: String?
+    let requestCount: Int?
+}
+
+struct LatestRequestDumpSnapshot {
+    let fileURL: URL
+    let timestamp: String?
+    let reason: String?
+    let method: String?
+    let requestURL: String?
+    let requestBaseURL: String?
+    let model: String?
+    let errorType: String?
+    let errorMessage: String?
+}
+
+struct EndpointTransparencySnapshot {
+    let provider: String
+    let model: String
+    let configBaseURL: String?
+    let envBaseURLKey: String?
+    let envBaseURL: String?
+    let credentialPoolEntries: [CredentialPoolEntrySnapshot]
+    let latestRequestDump: LatestRequestDumpSnapshot?
+    let sourceRows: [EndpointSourceSnapshot]
+
+    var hasMismatch: Bool {
+        sourceRows.contains(where: \.isMismatch)
+    }
+}
+
+struct GatewayProcessInfo: Identifiable {
+    let id: Int
+    let command: String
+    let startTime: Date?
+    let isLaunchdManaged: Bool
+    let isAuthoritative: Bool
+}
+
 enum ServiceStatus: String {
     case running
     case stopped
@@ -79,6 +161,14 @@ struct GatewaySnapshot {
     var serviceLoaded: Bool
     var serviceStatus: ServiceStatus
     var runtime: RuntimeStatus?
+    var authoritativeGatewayPID: Int?
+    var pidFilePID: Int?
+    var runtimeIsStale: Bool
+    var runtimeStaleReason: String?
+    var duplicateGatewayPIDs: [Int]
+    var gatewayProcesses: [GatewayProcessInfo]
+    var endpointTransparency: EndpointTransparencySnapshot?
+    var releaseInfo: HermesReleaseInfo?
     var sessions: SessionSummary
     var agentSessions: AgentSessionSummary
     var usage: ModelUsageSummary
@@ -89,11 +179,31 @@ struct GatewaySnapshot {
         serviceLoaded: false,
         serviceStatus: .unknown,
         runtime: nil,
+        authoritativeGatewayPID: nil,
+        pidFilePID: nil,
+        runtimeIsStale: false,
+        runtimeStaleReason: nil,
+        duplicateGatewayPIDs: [],
+        gatewayProcesses: [],
+        endpointTransparency: nil,
+        releaseInfo: nil,
         sessions: SessionSummary(totalCount: 0, recent: []),
         agentSessions: .empty,
         usage: .empty,
         lastCommandOutput: nil
     )
+
+    var hasDuplicateGatewayProcesses: Bool {
+        gatewayProcesses.count > 1
+    }
+
+    var trustedRuntime: RuntimeStatus? {
+        runtimeIsStale ? nil : runtime
+    }
+
+    var displayPlatforms: [String: RuntimePlatformState]? {
+        runtime?.platforms
+    }
 
     var menuBarSymbol: String {
         serviceStatus.symbol

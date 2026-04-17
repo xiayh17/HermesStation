@@ -662,7 +662,7 @@ final class HermesProfileStore: ObservableObject {
         }
     }
 
-    static func parseConfigValues(from url: URL) -> [String: String] {
+    nonisolated static func parseConfigValues(from url: URL) -> [String: String] {
         guard let content = readText(at: url) else { return [:] }
 
         var values: [String: String] = [:]
@@ -696,7 +696,7 @@ final class HermesProfileStore: ObservableObject {
         return values
     }
 
-    static func parseEnvValues(from url: URL) -> [String: String] {
+    nonisolated static func parseEnvValues(from url: URL) -> [String: String] {
         guard let content = readText(at: url) else { return [:] }
 
         var values: [String: String] = [:]
@@ -711,7 +711,7 @@ final class HermesProfileStore: ObservableObject {
         return values
     }
 
-    private static func readText(at url: URL) -> String? {
+    nonisolated private static func readText(at url: URL) -> String? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         if let text = try? String(contentsOf: url, encoding: .utf8) {
             return text
@@ -719,7 +719,7 @@ final class HermesProfileStore: ObservableObject {
         return try? String(contentsOf: url, encoding: .isoLatin1)
     }
 
-    private static func cleanValue(_ raw: String) -> String {
+    nonisolated private static func cleanValue(_ raw: String) -> String {
         let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard value.count >= 2 else { return value }
         if (value.hasPrefix("\"") && value.hasSuffix("\"")) || (value.hasPrefix("'") && value.hasSuffix("'")) {
@@ -728,7 +728,7 @@ final class HermesProfileStore: ObservableObject {
         return value
     }
 
-    private static func parseBoolean(_ raw: String?) -> Bool {
+    nonisolated private static func parseBoolean(_ raw: String?) -> Bool {
         guard let raw else { return false }
         switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "1", "true", "yes", "on":
@@ -738,7 +738,7 @@ final class HermesProfileStore: ObservableObject {
         }
     }
 
-    private static func parseInteger(_ raw: String?) -> Int? {
+    nonisolated private static func parseInteger(_ raw: String?) -> Int? {
         guard let raw else { return nil }
         return Int(raw.trimmingCharacters(in: .whitespacesAndNewlines))
     }
