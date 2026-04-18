@@ -586,6 +586,11 @@ final class GatewayStore: ObservableObject {
         let gatewayProcesses = await readGatewayProcesses(settings: settings, launchdPID: launchdPID)
         let endpointTransparency = loadEndpointTransparency(paths: paths)
         let agentSessions = SQLiteSessionStore.loadAgents(from: paths.stateDB, paths: paths)
+        let sessionBindings = SessionBindingStore.load(from: paths.sessionBindingsURL)
+        let recentAgentActivityCount = computeRecentAgentActivityCount(
+            sessions: agentSessions.rows,
+            bindings: sessionBindings
+        )
         let usage = SQLiteSessionStore.loadUsage(from: paths.stateDB)
         let sessions = SessionSummary(
             totalCount: agentSessions.totalCount,
@@ -666,6 +671,8 @@ final class GatewayStore: ObservableObject {
             doctorReport: doctorReport,
             sessions: sessions,
             agentSessions: agentSessions,
+            sessionBindings: sessionBindings,
+            recentAgentActivityCount: recentAgentActivityCount,
             usage: usage,
             lastCommandOutput: previousOutput
         )
@@ -1187,6 +1194,28 @@ final class GatewayStore: ObservableObject {
             return "gateway_state.json says \(runtime.gatewayState ?? "unknown") while process is alive"
         }
         return nil
+    }
+
+    nonisolated private static func computeRecentAgentActivityCount(
+        sessions: [AgentSessionRow],
+        bindings: [SessionBindingEntry]
+    ) -> Int {
+        let threshold: TimeInterval = 180
+        let now = Date()
+        let bindingsBySessionID = Dictionary(uniqueKeysWithValues: bindings.map { ($0.sessionID, $0) })
+
+        return sessions.reduce(into: 0) { count, session in
+            guard session.isActive else { return }
+
+            let transcriptMTime = (try? session.transcriptURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? nil
+            let bindingUpdatedAt = bindingsBySessionID[session.id]?.updatedAtDate
+            let startedAt = Date(timeIntervalSince1970: session.startedAt)
+            let latestActivity = [transcriptMTime, bindingUpdatedAt, startedAt].compactMap { $0 }.max() ?? startedAt
+
+            if now.timeIntervalSince(latestActivity) <= threshold {
+                count += 1
+            }
+        }
     }
 
     private func createLogExcerpt(for sessionID: String) throws -> URL {

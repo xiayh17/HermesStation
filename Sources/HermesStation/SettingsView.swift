@@ -6,6 +6,8 @@ private enum SettingsTab: Hashable {
     case general
     case model
     case sessions
+    case memory
+    case skills
     case usage
     case platforms
     case environment
@@ -23,6 +25,22 @@ private enum AgentPanelFilter: String, CaseIterable, Identifiable {
         case .all: return "All"
         case .running: return "Running"
         case .completed: return "Completed"
+        }
+    }
+}
+
+private enum SkillPanelFilter: String, CaseIterable, Identifiable {
+    case all
+    case enabled
+    case disabled
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .all: return "All"
+        case .enabled: return "Enabled"
+        case .disabled: return "Disabled"
         }
     }
 }
@@ -214,6 +232,18 @@ struct SettingsView: View {
     @State private var agentSearchText: String = ""
     @State private var agentFilter: AgentPanelFilter = .all
     @State private var agentRenameDraft: String = ""
+    @State private var memoryEntries: [MemoryCatalogEntry] = []
+    @State private var selectedMemoryEntryID: String?
+    @State private var memorySearchText: String = ""
+    @State private var memorySourceFilter: String = "All"
+    @State private var isLoadingMemoryEntries = false
+    @State private var skillEntries: [SkillCatalogEntry] = []
+    @State private var selectedSkillEntryID: String?
+    @State private var skillSearchText: String = ""
+    @State private var skillFilter: SkillPanelFilter = .all
+    @State private var isLoadingSkillEntries = false
+    @State private var isPerformingSkillAction = false
+    @State private var skillActionMessage: String?
     @State private var showDeleteAgentAlert = false
     @State private var showDeleteProviderAlert = false
     @State private var selectedAgentTranscript: SessionTranscript? = nil
@@ -250,6 +280,12 @@ struct SettingsView: View {
             agentTab
                 .tabItem { Label("Sessions", systemImage: "person.2") }
                 .tag(SettingsTab.sessions)
+            memoryTab
+                .tabItem { Label("Memory", systemImage: "brain.head.profile") }
+                .tag(SettingsTab.memory)
+            skillsTab
+                .tabItem { Label("Skills", systemImage: "wand.and.stars") }
+                .tag(SettingsTab.skills)
             usageTab
                 .tabItem { Label("Usage", systemImage: "chart.bar") }
                 .tag(SettingsTab.usage)
@@ -265,6 +301,7 @@ struct SettingsView: View {
             guard !hasLoadedDraft else { return }
             syncDrafts()
             refreshPlatformInstances()
+            reloadKnowledgeCatalogs()
             hasLoadedDraft = true
         }
         .onChange(of: settingsStore.settings) { _, newValue in
@@ -274,6 +311,7 @@ struct SettingsView: View {
             selectedPlatformInstanceID = nil
             refreshPlatformInstances()
             syncModelSelection()
+            reloadKnowledgeCatalogs()
         }
         .onChange(of: profileStore.snapshot) { _, newValue in
             hermesDraft = newValue.draft
@@ -308,6 +346,18 @@ struct SettingsView: View {
             }
             agentRenameDraft = agent.title
             loadTranscript(for: agent)
+        }
+        .onChange(of: memorySearchText) { _, _ in
+            syncMemorySelection()
+        }
+        .onChange(of: memorySourceFilter) { _, _ in
+            syncMemorySelection()
+        }
+        .onChange(of: skillSearchText) { _, _ in
+            syncSkillSelection()
+        }
+        .onChange(of: skillFilter) { _, _ in
+            syncSkillSelection()
         }
         .onChange(of: gatewayStore.snapshot.agentSessions.totalCount) { _, _ in
             syncAgentSelection()
@@ -357,7 +407,8 @@ struct SettingsView: View {
                     summaryPill(title: "Gateway", value: gatewayRuntimeHeadline)
                     summaryPill(title: "Provider", value: activeProviderTitle)
                     summaryPill(title: "Platforms", value: "\(connectedPlatformCount)/\(configuredPlatformCount) connected")
-                    summaryPill(title: "Agents", value: "\(gatewayStore.snapshot.trustedRuntime?.activeAgents ?? 0)")
+                    summaryPill(title: "Active", value: gatewayStore.snapshot.liveAgentCountDisplay)
+                    summaryPill(title: "Bindings", value: "\(gatewayStore.snapshot.boundSessionCount)")
                     summaryPill(title: "Sessions", value: "\(gatewayStore.snapshot.agentSessions.totalCount)")
                 }
 
@@ -1418,6 +1469,24 @@ struct SettingsView: View {
         }
     }
 
+    private var memoryTab: some View {
+        HStack(spacing: 0) {
+            memorySidebar
+            Divider()
+            memoryDetailPanel
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var skillsTab: some View {
+        HStack(spacing: 0) {
+            skillsSidebar
+            Divider()
+            skillsDetailPanel
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
     // MARK: - Usage
 
     private var usageTab: some View {
@@ -1505,7 +1574,8 @@ struct SettingsView: View {
             HStack {
                 summaryPill(title: "Active", value: "\(gatewayStore.snapshot.agentSessions.activeCount)")
                 summaryPill(title: "Tracked", value: "\(gatewayStore.snapshot.agentSessions.totalCount)")
-                summaryPill(title: "Runtime", value: "\(gatewayStore.snapshot.trustedRuntime?.activeAgents ?? 0)")
+                summaryPill(title: "Bound", value: "\(gatewayStore.snapshot.boundSessionCount)")
+                summaryPill(title: "Live", value: gatewayStore.snapshot.liveAgentCountDisplay)
             }
             .padding(.horizontal, 12)
             .padding(.top, 12)
@@ -1523,31 +1593,162 @@ struct SettingsView: View {
                 .padding(.horizontal, 12)
 
             List(selection: selectedAgentBinding) {
-                ForEach(filteredAgents) { agent in
-                    agentRow(agent)
-                        .onHover { isHovering in
-                            hoveredAgentPreviewID = isHovering ? agent.id : (hoveredAgentPreviewID == agent.id ? nil : hoveredAgentPreviewID)
-                        }
-                        .popover(
-                            isPresented: Binding(
-                                get: { hoveredAgentPreviewID == agent.id },
-                                set: { isPresented in
-                                    if !isPresented, hoveredAgentPreviewID == agent.id {
-                                        hoveredAgentPreviewID = nil
-                                    }
+                if !filteredBoundAgents.isEmpty {
+                    Section("Bound Sessions") {
+                        ForEach(filteredBoundAgents) { agent in
+                            agentRow(agent)
+                                .onHover { isHovering in
+                                    hoveredAgentPreviewID = isHovering ? agent.id : (hoveredAgentPreviewID == agent.id ? nil : hoveredAgentPreviewID)
                                 }
-                            ),
-                            arrowEdge: .trailing
-                        ) {
-                            sessionPreviewPopover(agent)
+                                .popover(
+                                    isPresented: Binding(
+                                        get: { hoveredAgentPreviewID == agent.id },
+                                        set: { isPresented in
+                                            if !isPresented, hoveredAgentPreviewID == agent.id {
+                                                hoveredAgentPreviewID = nil
+                                            }
+                                        }
+                                    ),
+                                    arrowEdge: .trailing
+                                ) {
+                                    sessionPreviewPopover(agent)
+                                }
+                                .tag(agent.id)
                         }
-                        .tag(agent.id)
+                    }
+                }
+
+                if !filteredUnboundAgents.isEmpty {
+                    Section(filteredBoundAgents.isEmpty ? "Sessions" : "Other Sessions") {
+                        ForEach(filteredUnboundAgents) { agent in
+                            agentRow(agent)
+                                .onHover { isHovering in
+                                    hoveredAgentPreviewID = isHovering ? agent.id : (hoveredAgentPreviewID == agent.id ? nil : hoveredAgentPreviewID)
+                                }
+                                .popover(
+                                    isPresented: Binding(
+                                        get: { hoveredAgentPreviewID == agent.id },
+                                        set: { isPresented in
+                                            if !isPresented, hoveredAgentPreviewID == agent.id {
+                                                hoveredAgentPreviewID = nil
+                                            }
+                                        }
+                                    ),
+                                    arrowEdge: .trailing
+                                ) {
+                                    sessionPreviewPopover(agent)
+                                }
+                                .tag(agent.id)
+                        }
+                    }
                 }
             }
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
         }
         .frame(minWidth: 320, idealWidth: 360, maxWidth: 420, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private var memorySidebar: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                summaryPill(title: "Entries", value: "\(memoryEntries.count)")
+                summaryPill(title: "Sources", value: "\(memorySourceOptions.count)")
+                Spacer()
+                Button {
+                    reloadMemoryEntries()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .hoverPlate(cornerRadius: 6)
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 12)
+
+            Picker("Source", selection: $memorySourceFilter) {
+                Text("All").tag("All")
+                ForEach(memorySourceOptions, id: \.self) { source in
+                    Text(source).tag(source)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 12)
+
+            TextField("Search memory content / source", text: $memorySearchText)
+                .textFieldStyle(.roundedBorder)
+                .padding(.horizontal, 12)
+
+            if isLoadingMemoryEntries {
+                ProgressView()
+                    .controlSize(.small)
+                    .padding(.horizontal, 12)
+            }
+
+            List(selection: selectedMemoryEntryBinding) {
+                ForEach(filteredMemoryEntries) { entry in
+                    memoryRow(entry)
+                        .tag(entry.id)
+                }
+            }
+            .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
+        }
+        .frame(minWidth: 320, idealWidth: 360, maxWidth: 420, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private var skillsSidebar: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                summaryPill(title: "Enabled", value: "\(enabledSkillCount)")
+                summaryPill(title: "Total", value: "\(skillEntries.count)")
+                summaryPill(title: "Categories", value: "\(skillCategoryCount)")
+                Spacer()
+                Button {
+                    reloadSkillEntries()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .hoverPlate(cornerRadius: 6)
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 12)
+
+            Picker("Status", selection: $skillFilter) {
+                ForEach(SkillPanelFilter.allCases) { filter in
+                    Text(filter.title).tag(filter)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 12)
+
+            TextField("Search skill / description / tag", text: $skillSearchText)
+                .textFieldStyle(.roundedBorder)
+                .padding(.horizontal, 12)
+
+            if isLoadingSkillEntries {
+                ProgressView()
+                    .controlSize(.small)
+                    .padding(.horizontal, 12)
+            }
+
+            List(selection: selectedSkillEntryBinding) {
+                ForEach(filteredSkillEntries) { skill in
+                    skillRow(skill)
+                        .tag(skill.id)
+                }
+            }
+            .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
+        }
+        .frame(minWidth: 340, idealWidth: 380, maxWidth: 440, maxHeight: .infinity, alignment: .topLeading)
         .background(Color(nsColor: .controlBackgroundColor))
     }
 
@@ -1609,6 +1810,36 @@ struct SettingsView: View {
                             .padding(.top, 4)
                         }
 
+                        if let binding = selectedAgentBindingEntry {
+                            GroupBox("Binding") {
+                                VStack(alignment: .leading, spacing: 10) {
+                                    detailRow("Platform", binding.resolvedPlatformID)
+                                    detailRow("Session Key", binding.sessionKey)
+                                    detailRow("Bound To", binding.displayLabel)
+                                    if !binding.displaySubtitle.isEmpty {
+                                        detailRow("Context", binding.displaySubtitle)
+                                    }
+                                    detailRow("Updated", formatBindingTimestamp(binding.updatedAtDate))
+
+                                    HStack {
+                                        Button("Show Platform") {
+                                            focusPlatform(binding.resolvedPlatformID)
+                                        }
+                                        Button("Reset Binding") {
+                                            gatewayStore.submitPendingAction(type: "reset_session", sessionKey: binding.sessionKey)
+                                        }
+                                        Button("Clear Model Binding") {
+                                            gatewayStore.submitPendingAction(type: "clear_model_override", sessionKey: binding.sessionKey)
+                                        }
+                                        Button("Evict Cached Agent") {
+                                            gatewayStore.submitPendingAction(type: "evict_agent", sessionKey: binding.sessionKey)
+                                        }
+                                    }
+                                }
+                                .padding(.top, 4)
+                            }
+                        }
+
                         GroupBox("Conversation") {
                             VStack(alignment: .leading, spacing: 12) {
                                 if isLoadingTranscript {
@@ -1663,6 +1894,198 @@ struct SettingsView: View {
                 Text("No agent selected")
                     .font(.system(size: 18, weight: .semibold))
                 Text("Pick a session from the left to inspect and manage it.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        }
+    }
+
+    @ViewBuilder
+    private var memoryDetailPanel: some View {
+        if let entry = selectedMemoryEntry {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack(alignment: .center, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(entry.title)
+                                .font(.system(size: 18, weight: .semibold))
+                            Text(entry.fileURL.lastPathComponent)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                        Spacer()
+                        memorySourceBadge(entry.source)
+                    }
+
+                    GroupBox("Actions") {
+                        HStack {
+                            Button("Open File") {
+                                openPath(entry.fileURL)
+                            }
+                            Button("Open Folder") {
+                                openPath(entry.fileURL.deletingLastPathComponent())
+                            }
+                            Button("Refresh") {
+                                reloadMemoryEntries()
+                            }
+                        }
+                        .padding(.top, 4)
+                    }
+
+                    GroupBox("Details") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            detailRow("Source", entry.source)
+                            detailRow("Path", entry.fileURL.path)
+                            detailRow("Updated", formatMemoryTimestamp(entry.modifiedAt))
+                            detailRow("Preview", entry.preview)
+                        }
+                        .padding(.top, 4)
+                    }
+
+                    GroupBox("Content") {
+                        Text(entry.body)
+                            .font(.system(size: 13))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.top, 4)
+                    }
+                }
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            .background(Color(nsColor: .windowBackgroundColor))
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("No memory entry selected")
+                    .font(.system(size: 18, weight: .semibold))
+                Text("Pick a memory item from the left to inspect persisted notes for the active Hermes profile.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        }
+    }
+
+    @ViewBuilder
+    private var skillsDetailPanel: some View {
+        if let skill = selectedSkillEntry {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack(alignment: .center, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(skill.name)
+                                .font(.system(size: 18, weight: .semibold))
+                            Text(skill.relativePath)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                        Spacer()
+                        skillStatusBadge(skill.isEnabled)
+                    }
+
+                    if let skillActionMessage, !skillActionMessage.isEmpty {
+                        Text(skillActionMessage)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(Color.secondary.opacity(0.08))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+
+                    GroupBox("Actions") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                Button(skill.isEnabled ? "Disable" : "Enable") {
+                                    toggleSkill(skill)
+                                }
+                                .disabled(isPerformingSkillAction)
+
+                                Button("Open Skill File") {
+                                    openPath(skill.fileURL)
+                                }
+
+                                Button("Open Folder") {
+                                    openPath(skill.folderURL)
+                                }
+
+                                Button("Refresh") {
+                                    reloadSkillEntries()
+                                }
+                            }
+                        }
+                        .padding(.top, 4)
+                    }
+
+                    GroupBox("Details") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            detailRow("Identifier", skill.identifier)
+                            detailRow("Category", skill.categoryPath)
+                            detailRow("Path", skill.folderURL.path)
+                            detailRow("Version", skill.version ?? "n/a")
+                            detailRow("Author", skill.author ?? "n/a")
+                            detailRow("License", skill.license ?? "n/a")
+                            if let homepage = skill.homepage, !homepage.isEmpty {
+                                detailRow("Homepage", homepage)
+                            }
+                            if !skill.platforms.isEmpty {
+                                detailRow("Platforms", skill.platforms.joined(separator: ", "))
+                            }
+                            detailRow("Manifest", skill.hash ?? "disabled")
+                        }
+                        .padding(.top, 4)
+                    }
+
+                    if !skill.tags.isEmpty {
+                        GroupBox("Tags") {
+                            tokenWrap(skill.tags)
+                                .padding(.top, 4)
+                        }
+                    }
+
+                    if !skill.prerequisites.isEmpty {
+                        GroupBox("Prerequisites") {
+                            VStack(alignment: .leading, spacing: 8) {
+                                ForEach(skill.prerequisites, id: \.self) { command in
+                                    Text(command)
+                                        .font(.system(size: 12, design: .monospaced))
+                                        .textSelection(.enabled)
+                                }
+                            }
+                            .padding(.top, 4)
+                        }
+                    }
+
+                    GroupBox("Summary") {
+                        Text(skill.description)
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.top, 4)
+                    }
+
+                    if !skill.body.isEmpty {
+                        GroupBox("Content") {
+                            Text(skill.body)
+                                .font(.system(size: 13))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.top, 4)
+                        }
+                    }
+                }
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            .background(Color(nsColor: .windowBackgroundColor))
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("No skill selected")
+                    .font(.system(size: 18, weight: .semibold))
+                Text("Pick a skill from the left to inspect metadata and manage enable or disable state in the active profile.")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }
@@ -2118,7 +2541,7 @@ struct SettingsView: View {
     private func platformDiagnosticsSection(for instance: PlatformInstance) -> some View {
         let runtimeState = gatewayStore.snapshot.runtime?.platforms[instance.platformID]
         let hints = platformDiagnosticHints(for: instance, runtimeState: runtimeState, logLines: platformDiagnosticLines)
-        let activeSessions = gatewayStore.snapshot.trustedRuntime?.activeSessions?[instance.platformID] ?? []
+        let boundSessions = gatewayStore.snapshot.bindingEntries(for: instance.platformID)
         let modelOverrides = gatewayStore.snapshot.trustedRuntime?.modelOverrides?[instance.platformID] ?? []
 
         VStack(alignment: .leading, spacing: 12) {
@@ -2148,38 +2571,52 @@ struct SettingsView: View {
 
             platformDependencySection
 
-            if !activeSessions.isEmpty || !modelOverrides.isEmpty {
+            if !boundSessions.isEmpty || !modelOverrides.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Active Sessions & Bindings")
+                    Text("Bound Sessions")
                         .font(.system(size: 12, weight: .medium))
 
-                    ForEach(activeSessions, id: \.sessionKey) { session in
+                    ForEach(boundSessions) { binding in
                         HStack(alignment: .top, spacing: 6) {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(session.sessionKey ?? "unknown")
+                                HStack(spacing: 6) {
+                                    Text(binding.sessionID)
+                                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                    statusBadge(gatewayStore.snapshot.isBindingLive(binding) ? "live" : "stored", color: gatewayStore.snapshot.isBindingLive(binding) ? .green : .secondary)
+                                }
+                                Text(binding.sessionKey)
                                     .font(.system(size: 10, design: .monospaced))
-                                if let model = session.model, !model.isEmpty {
-                                    Text("model: \(model)")
+                                Text(binding.displayLabel)
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                                if !binding.displaySubtitle.isEmpty {
+                                    Text(binding.displaySubtitle)
                                         .font(.system(size: 10))
                                         .foregroundStyle(.secondary)
+                                }
+                                if let override = modelOverrides.first(where: { $0.sessionKey == binding.sessionKey })?.overrideModel,
+                                   !override.isEmpty {
+                                    Text("override: \(override)")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(.orange)
                                 }
                             }
                             Spacer()
                             Menu {
+                                Button("Show Session") {
+                                    focusAgentSession(binding.sessionID)
+                                }
+                                Button("Open Transcript") {
+                                    openTranscript(for: binding)
+                                }
                                 Button("Reset Session") {
-                                    if let sk = session.sessionKey {
-                                        gatewayStore.submitPendingAction(type: "reset_session", sessionKey: sk)
-                                    }
+                                    gatewayStore.submitPendingAction(type: "reset_session", sessionKey: binding.sessionKey)
                                 }
                                 Button("Clear Model Binding") {
-                                    if let sk = session.sessionKey {
-                                        gatewayStore.submitPendingAction(type: "clear_model_override", sessionKey: sk)
-                                    }
+                                    gatewayStore.submitPendingAction(type: "clear_model_override", sessionKey: binding.sessionKey)
                                 }
                                 Button("Evict Cached Agent") {
-                                    if let sk = session.sessionKey {
-                                        gatewayStore.submitPendingAction(type: "evict_agent", sessionKey: sk)
-                                    }
+                                    gatewayStore.submitPendingAction(type: "evict_agent", sessionKey: binding.sessionKey)
                                 }
                             } label: {
                                 Image(systemName: "ellipsis.circle")
@@ -4013,6 +4450,7 @@ struct SettingsView: View {
     private func stationPlatformCard(_ instance: PlatformInstance) -> some View {
         let runtimeState = gatewayStore.snapshot.runtime?.platforms[instance.platformID]
         let descriptor = PlatformDescriptorRegistry.descriptor(for: instance.platformID)
+        let bindings = gatewayStore.snapshot.bindingEntries(for: instance.platformID)
         return VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 8) {
                 Image(systemName: descriptor?.icon ?? "network")
@@ -4034,6 +4472,9 @@ struct SettingsView: View {
             detailRowCompact("Home", stationPlatformHome(instance))
             detailRowCompact("Allowed", stationPlatformAllowlist(instance))
             detailRowCompact("Transport", stationPlatformTransport(instance))
+            if !bindings.isEmpty {
+                detailRowCompact("Bindings", "\(bindings.count) session(s) · latest \(bindings[0].displayLabel)")
+            }
 
             HStack {
                 Button("Manage") {
@@ -4406,7 +4847,8 @@ struct SettingsView: View {
     }
 
     private func agentRow(_ agent: AgentSessionRow) -> some View {
-        HStack(alignment: .top, spacing: 10) {
+        let binding = bindingEntry(for: agent)
+        return HStack(alignment: .top, spacing: 10) {
             Circle()
                 .fill(agent.isActive ? .green : .secondary)
                 .frame(width: 8, height: 8)
@@ -4419,6 +4861,15 @@ struct SettingsView: View {
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                if let binding {
+                    HStack(spacing: 6) {
+                        statusBadge(binding.resolvedPlatformID, color: .blue)
+                        Text(binding.displayLabel)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
                 Text(agent.startedAtText)
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
@@ -4428,6 +4879,74 @@ struct SettingsView: View {
         .padding(.vertical, 3)
         .contentShape(Rectangle())
         .hoverPlate(cornerRadius: 6)
+    }
+
+    private func memoryRow(_ entry: MemoryCatalogEntry) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(entry.title)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                Spacer()
+                memorySourceBadge(entry.source)
+            }
+            Text(entry.preview)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+            Text(formatMemoryTimestamp(entry.modifiedAt))
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .padding(.vertical, 3)
+        .contentShape(Rectangle())
+        .hoverPlate(cornerRadius: 6)
+    }
+
+    private func skillRow(_ skill: SkillCatalogEntry) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(skill.name)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                Spacer()
+                skillStatusBadge(skill.isEnabled)
+            }
+            Text(skill.description)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            Text(skill.categoryPath)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .padding(.vertical, 3)
+        .contentShape(Rectangle())
+        .hoverPlate(cornerRadius: 6)
+    }
+
+    private func tokenWrap(_ values: [String]) -> some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 6)], alignment: .leading, spacing: 6) {
+            ForEach(values, id: \.self) { value in
+                Text(value)
+                    .font(.system(size: 10, weight: .medium))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(Color.accentColor.opacity(0.12))
+                    .foregroundStyle(Color.accentColor)
+                    .clipShape(Capsule())
+            }
+        }
+    }
+
+    private func memorySourceBadge(_ source: String) -> some View {
+        statusBadge(source, color: source == "USER" ? .blue : .secondary)
+    }
+
+    private func skillStatusBadge(_ isEnabled: Bool) -> some View {
+        statusBadge(isEnabled ? "enabled" : "disabled", color: isEnabled ? .green : .secondary)
     }
 
     private func detailRow(_ title: String, _ value: String) -> some View {
@@ -4615,6 +5134,83 @@ struct SettingsView: View {
             get: { selectedAgentID },
             set: { selectedAgentID = $0 }
         )
+    }
+
+    private var selectedMemoryEntryBinding: Binding<String?> {
+        Binding(
+            get: { selectedMemoryEntryID },
+            set: { selectedMemoryEntryID = $0 }
+        )
+    }
+
+    private var selectedSkillEntryBinding: Binding<String?> {
+        Binding(
+            get: { selectedSkillEntryID },
+            set: { selectedSkillEntryID = $0 }
+        )
+    }
+
+    private var selectedMemoryEntry: MemoryCatalogEntry? {
+        guard let selectedMemoryEntryID else { return filteredMemoryEntries.first }
+        return filteredMemoryEntries.first(where: { $0.id == selectedMemoryEntryID }) ?? filteredMemoryEntries.first
+    }
+
+    private var selectedSkillEntry: SkillCatalogEntry? {
+        guard let selectedSkillEntryID else { return filteredSkillEntries.first }
+        return filteredSkillEntries.first(where: { $0.id == selectedSkillEntryID }) ?? filteredSkillEntries.first
+    }
+
+    private var memorySourceOptions: [String] {
+        Array(Set(memoryEntries.map(\.source))).sorted()
+    }
+
+    private var filteredMemoryEntries: [MemoryCatalogEntry] {
+        memoryEntries.filter { entry in
+            let matchesSource = memorySourceFilter == "All" || entry.source == memorySourceFilter
+            guard matchesSource else { return false }
+
+            let query = memorySearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !query.isEmpty else { return true }
+
+            let needle = query.lowercased()
+            return entry.title.lowercased().contains(needle)
+                || entry.preview.lowercased().contains(needle)
+                || entry.body.lowercased().contains(needle)
+                || entry.source.lowercased().contains(needle)
+        }
+    }
+
+    private var filteredSkillEntries: [SkillCatalogEntry] {
+        skillEntries.filter { skill in
+            let matchesFilter: Bool
+            switch skillFilter {
+            case .all:
+                matchesFilter = true
+            case .enabled:
+                matchesFilter = skill.isEnabled
+            case .disabled:
+                matchesFilter = !skill.isEnabled
+            }
+            guard matchesFilter else { return false }
+
+            let query = skillSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !query.isEmpty else { return true }
+
+            let needle = query.lowercased()
+            return skill.name.lowercased().contains(needle)
+                || skill.description.lowercased().contains(needle)
+                || skill.identifier.lowercased().contains(needle)
+                || skill.categoryPath.lowercased().contains(needle)
+                || skill.tags.contains(where: { $0.lowercased().contains(needle) })
+        }
+    }
+
+    private var enabledSkillCount: Int {
+        skillEntries.filter(\.isEnabled).count
+    }
+
+    private var skillCategoryCount: Int {
+        Set(skillEntries.map(\.categoryPath)).count
     }
 
     private var currentHermesProviderDescriptor: HermesProviderDescriptor? {
@@ -4907,9 +5503,26 @@ struct SettingsView: View {
         }
     }
 
+    private var filteredBoundAgents: [AgentSessionRow] {
+        filteredAgents.filter { bindingEntry(for: $0) != nil }
+    }
+
+    private var filteredUnboundAgents: [AgentSessionRow] {
+        filteredAgents.filter { bindingEntry(for: $0) == nil }
+    }
+
     private var selectedAgent: AgentSessionRow? {
         guard let selectedAgentID else { return filteredAgents.first ?? gatewayStore.snapshot.agentSessions.rows.first }
         return gatewayStore.snapshot.agentSessions.rows.first(where: { $0.id == selectedAgentID })
+    }
+
+    private var selectedAgentBindingEntry: SessionBindingEntry? {
+        guard let selectedAgent else { return nil }
+        return bindingEntry(for: selectedAgent)
+    }
+
+    private func bindingEntry(for agent: AgentSessionRow) -> SessionBindingEntry? {
+        gatewayStore.snapshot.bindingEntry(for: agent.id)
     }
 
     private var canSaveHermes: Bool {
@@ -5513,6 +6126,130 @@ struct SettingsView: View {
         }
         selectedAgentID = rows.first?.id
         agentRenameDraft = rows.first?.title ?? ""
+    }
+
+    private func reloadKnowledgeCatalogs() {
+        reloadMemoryEntries()
+        reloadSkillEntries()
+    }
+
+    private func reloadMemoryEntries() {
+        let settingsID = settingsStore.settings.id
+        let hermesHome = HermesPaths(settings: settingsStore.settings).hermesHome
+        isLoadingMemoryEntries = true
+
+        Task(priority: .utility) {
+            let entries = HermesKnowledgeCatalog.loadMemoryEntries(from: hermesHome)
+            await MainActor.run {
+                guard settingsStore.settings.id == settingsID else { return }
+                memoryEntries = entries
+                isLoadingMemoryEntries = false
+                syncMemorySelection()
+            }
+        }
+    }
+
+    private func reloadSkillEntries() {
+        let settingsID = settingsStore.settings.id
+        let hermesHome = HermesPaths(settings: settingsStore.settings).hermesHome
+        isLoadingSkillEntries = true
+
+        Task(priority: .utility) {
+            let entries = HermesKnowledgeCatalog.loadSkills(from: hermesHome)
+            await MainActor.run {
+                guard settingsStore.settings.id == settingsID else { return }
+                skillEntries = entries
+                isLoadingSkillEntries = false
+                syncSkillSelection()
+            }
+        }
+    }
+
+    private func syncMemorySelection() {
+        if memorySourceFilter != "All", !memorySourceOptions.contains(memorySourceFilter) {
+            memorySourceFilter = "All"
+        }
+
+        if let selectedMemoryEntryID, filteredMemoryEntries.contains(where: { $0.id == selectedMemoryEntryID }) {
+            return
+        }
+
+        selectedMemoryEntryID = filteredMemoryEntries.first?.id
+    }
+
+    private func syncSkillSelection() {
+        if let selectedSkillEntryID, filteredSkillEntries.contains(where: { $0.id == selectedSkillEntryID }) {
+            return
+        }
+
+        selectedSkillEntryID = filteredSkillEntries.first?.id
+    }
+
+    private func toggleSkill(_ skill: SkillCatalogEntry) {
+        let action = skill.isEnabled ? "disable" : "enable"
+        isPerformingSkillAction = true
+        skillActionMessage = nil
+
+        Task {
+            do {
+                let result = try await CommandRunner.runHermes(settingsStore.settings, ["skills", action, skill.identifier])
+                await MainActor.run {
+                    let output = result.combinedOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if output.isEmpty {
+                        skillActionMessage = "\(skill.name) \(skill.isEnabled ? "disabled" : "enabled")."
+                    } else {
+                        skillActionMessage = output
+                    }
+                    isPerformingSkillAction = false
+                    reloadSkillEntries()
+                }
+            } catch {
+                await MainActor.run {
+                    skillActionMessage = error.localizedDescription
+                    isPerformingSkillAction = false
+                }
+            }
+        }
+    }
+
+    private func formatMemoryTimestamp(_ date: Date?) -> String {
+        guard let date else { return "n/a" }
+        return memoryTimestampFormatter.localizedString(for: date, relativeTo: Date())
+    }
+
+    private func formatBindingTimestamp(_ date: Date?) -> String {
+        guard let date else { return "n/a" }
+        return bindingTimestampFormatter.localizedString(for: date, relativeTo: Date())
+    }
+
+    private var memoryTimestampFormatter: RelativeDateTimeFormatter {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter
+    }
+
+    private var bindingTimestampFormatter: RelativeDateTimeFormatter {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter
+    }
+
+    private func focusAgentSession(_ sessionID: String) {
+        selectedAgentID = sessionID
+        selectedTab = .sessions
+    }
+
+    private func focusPlatform(_ platformID: String) {
+        selectedPlatformInstanceID = platformID
+        if let instance = platformInstancesCache.first(where: { $0.platformID == platformID || $0.id == platformID }) {
+            loadPlatformConfigDraft(for: instance)
+        }
+        selectedTab = .platforms
+    }
+
+    private func openTranscript(for binding: SessionBindingEntry) {
+        let transcriptURL = HermesPaths(settings: settingsStore.settings).transcriptURL(for: binding.sessionID)
+        openPath(transcriptURL)
     }
 
     // MARK: - Model Health Helpers

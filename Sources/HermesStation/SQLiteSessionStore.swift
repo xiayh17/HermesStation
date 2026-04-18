@@ -444,4 +444,10 @@ enum SQLiteSessionStore {
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
         return formatter
     }()
+
+    private static func optionalStringColumn(_ stmt: OpaquePointer?, index: Int32) -> String? {
+        guard sqlite3_column_type(stmt, index) != SQLITE_NULL else { return nil }
+        guard let ptr = sqlite3_column_text(stmt, index) else { return nil }
+        return String(cString: ptr)
+    }
 }

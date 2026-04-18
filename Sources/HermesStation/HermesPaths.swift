@@ -67,6 +67,10 @@ struct HermesPaths {
         sessionsDir.appending(path: "session_model_overrides.json")
     }
 
+    var sessionBindingsURL: URL {
+        sessionsDir.appending(path: "sessions.json")
+    }
+
     var logsDir: URL {
         hermesHome.appending(path: "logs", directoryHint: .isDirectory)
     }

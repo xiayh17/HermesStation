@@ -152,7 +152,8 @@ struct MenuContentView: View {
             HStack {
                 statusPill("Installed", value: store.snapshot.serviceInstalled ? "yes" : "no")
                 statusPill("Loaded", value: store.snapshot.serviceLoaded ? "yes" : "no")
-                statusPill("Agents", value: "\(store.snapshot.trustedRuntime?.activeAgents ?? 0)")
+                statusPill("Active", value: store.snapshot.liveAgentCountDisplay)
+                statusPill("Bindings", value: "\(store.snapshot.boundSessionCount)")
             }
             Text(serviceDetailLine)
                 .font(.system(size: 11))
@@ -314,24 +315,26 @@ struct MenuContentView: View {
     }
 
     private var footerSection: some View {
-        HStack {
-            Button("Settings…") {
-                SettingsWindowController.shared.show(
-                    settingsStore: settingsStore,
-                    profileStore: profileStore,
-                    gatewayStore: store
-                )
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .hoverPlate(cornerRadius: 6)
-            Spacer()
-            Button("Quit") { NSApp.terminate(nil) }
+        VStack(spacing: 8) {
+            HStack {
+                Button("Settings…") {
+                    SettingsWindowController.shared.show(
+                        settingsStore: settingsStore,
+                        profileStore: profileStore,
+                        gatewayStore: store
+                    )
+                }
                 .buttonStyle(.plain)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
                 .hoverPlate(cornerRadius: 6)
+                Spacer()
+                Button("Quit") { NSApp.terminate(nil) }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .hoverPlate(cornerRadius: 6)
+            }
         }
     }
 

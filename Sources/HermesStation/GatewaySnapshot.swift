@@ -206,6 +206,8 @@ struct GatewaySnapshot {
     var doctorReport: HermesDoctorReport?
     var sessions: SessionSummary
     var agentSessions: AgentSessionSummary
+    var sessionBindings: [SessionBindingEntry]
+    var recentAgentActivityCount: Int
     var usage: ModelUsageSummary
     var lastCommandOutput: String?
 
@@ -227,6 +229,8 @@ struct GatewaySnapshot {
         doctorReport: nil,
         sessions: SessionSummary(totalCount: 0, recent: []),
         agentSessions: .empty,
+        sessionBindings: [],
+        recentAgentActivityCount: 0,
         usage: .empty,
         lastCommandOutput: nil
     )
@@ -237,6 +241,46 @@ struct GatewaySnapshot {
 
     var trustedRuntime: RuntimeStatus? {
         runtimeIsStale ? nil : runtime
+    }
+
+    var liveAgentCount: Int {
+        trustedRuntime?.activeAgents ?? 0
+    }
+
+    var effectiveLiveAgentCount: Int {
+        max(liveAgentCount, recentAgentActivityCount)
+    }
+
+    var liveAgentCountIsEstimated: Bool {
+        liveAgentCount == 0 && recentAgentActivityCount > 0
+    }
+
+    var liveAgentCountDisplay: String {
+        liveAgentCountIsEstimated ? "~\(effectiveLiveAgentCount)" : "\(effectiveLiveAgentCount)"
+    }
+
+    var boundSessionCount: Int {
+        sessionBindings.count
+    }
+
+    var liveBindingKeys: Set<String> {
+        Set(
+            trustedRuntime?.activeSessions?.values
+                .flatMap { $0 }
+                .compactMap(\.sessionKey) ?? []
+        )
+    }
+
+    func bindingEntry(for sessionID: String) -> SessionBindingEntry? {
+        sessionBindings.first { $0.sessionID == sessionID }
+    }
+
+    func bindingEntries(for platformID: String) -> [SessionBindingEntry] {
+        sessionBindings.filter { $0.resolvedPlatformID == platformID }
+    }
+
+    func isBindingLive(_ binding: SessionBindingEntry) -> Bool {
+        liveBindingKeys.contains(binding.sessionKey)
     }
 
     var displayPlatforms: [String: RuntimePlatformState]? {
