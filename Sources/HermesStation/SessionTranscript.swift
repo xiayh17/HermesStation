@@ -14,6 +14,15 @@ struct SessionTranscript: Decodable {
     }
 }
 
+extension SessionTranscript {
+    var searchableText: String {
+        ([systemPrompt] + messages.map(\.searchableText))
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+    }
+}
+
 struct TranscriptMessage: Decodable, Identifiable {
     let id = UUID()
     let role: String
@@ -33,6 +42,23 @@ struct TranscriptMessage: Decodable, Identifiable {
     }
 }
 
+extension TranscriptMessage {
+    var searchableText: String? {
+        let parts = [
+            content,
+            reasoning,
+            toolCalls?.map(\.searchableText).joined(separator: "\n"),
+            toolCallId,
+            finishReason,
+        ]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        guard !parts.isEmpty else { return nil }
+        return parts.joined(separator: "\n")
+    }
+}
+
 struct TranscriptToolCall: Decodable, Identifiable {
     let id: String
     let type: String?
@@ -42,6 +68,15 @@ struct TranscriptToolCall: Decodable, Identifiable {
         case id
         case type
         case function
+    }
+}
+
+extension TranscriptToolCall {
+    var searchableText: String {
+        [function?.name, function?.arguments, type, id]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
     }
 }
 

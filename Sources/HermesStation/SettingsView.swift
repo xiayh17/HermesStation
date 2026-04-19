@@ -233,6 +233,8 @@ struct SettingsView: View {
     @State private var hoveredAgentPreviewID: String?
     @State private var agentSearchText: String = ""
     @State private var agentFilter: AgentPanelFilter = .all
+    @State private var agentTranscriptSearchTextByID: [String: String] = [:]
+    @State private var isLoadingAgentSearchIndex = false
     @State private var agentRenameDraft: String = ""
     @State private var memoryEntries: [MemoryCatalogEntry] = []
     @State private var selectedMemoryEntryID: String?
@@ -310,6 +312,7 @@ struct SettingsView: View {
             syncDrafts()
             refreshPlatformInstances()
             reloadKnowledgeCatalogs()
+            reloadAgentSearchIndex()
             hasLoadedDraft = true
         }
         .onChange(of: settingsStore.settings) { _, newValue in
@@ -320,6 +323,7 @@ struct SettingsView: View {
             refreshPlatformInstances()
             syncModelSelection()
             reloadKnowledgeCatalogs()
+            reloadAgentSearchIndex()
         }
         .onChange(of: profileStore.snapshot) { _, newValue in
             hermesDraft = newValue.draft
@@ -355,6 +359,12 @@ struct SettingsView: View {
             agentRenameDraft = agent.title
             loadTranscript(for: agent)
         }
+        .onChange(of: agentSearchText) { _, _ in
+            syncAgentSelection()
+        }
+        .onChange(of: agentFilter) { _, _ in
+            syncAgentSelection()
+        }
         .onChange(of: memorySearchText) { _, _ in
             syncMemorySelection()
         }
@@ -367,8 +377,9 @@ struct SettingsView: View {
         .onChange(of: skillFilter) { _, _ in
             syncSkillSelection()
         }
-        .onChange(of: gatewayStore.snapshot.agentSessions.totalCount) { _, _ in
+        .onChange(of: gatewayStore.snapshot.agentSessions.rows.map(\.id)) { _, _ in
             syncAgentSelection()
+            reloadAgentSearchIndex()
         }
     }
 
@@ -1596,9 +1607,20 @@ struct SettingsView: View {
             .pickerStyle(.segmented)
             .padding(.horizontal, 12)
 
-            TextField("Search title / id / source / model", text: $agentSearchText)
+            TextField("Fuzzy search title / id / source / model / transcript", text: $agentSearchText)
                 .textFieldStyle(.roundedBorder)
                 .padding(.horizontal, 12)
+
+            if isLoadingAgentSearchIndex {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Indexing transcript content for fuzzy search…")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 12)
+            }
 
             List(selection: selectedAgentBinding) {
                 if !filteredBoundAgents.isEmpty {
@@ -1686,7 +1708,7 @@ struct SettingsView: View {
             .pickerStyle(.segmented)
             .padding(.horizontal, 12)
 
-            TextField("Search memory content / source", text: $memorySearchText)
+            TextField("Fuzzy search memory title / content / source", text: $memorySearchText)
                 .textFieldStyle(.roundedBorder)
                 .padding(.horizontal, 12)
 
@@ -5173,18 +5195,16 @@ struct SettingsView: View {
     }
 
     private var filteredMemoryEntries: [MemoryCatalogEntry] {
-        memoryEntries.filter { entry in
+        let sourceFiltered = memoryEntries.filter { entry in
             let matchesSource = memorySourceFilter == "All" || entry.source == memorySourceFilter
-            guard matchesSource else { return false }
+            return matchesSource
+        }
 
-            let query = memorySearchText.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !query.isEmpty else { return true }
+        let query = memorySearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return sourceFiltered }
 
-            let needle = query.lowercased()
-            return entry.title.lowercased().contains(needle)
-                || entry.preview.lowercased().contains(needle)
-                || entry.body.lowercased().contains(needle)
-                || entry.source.lowercased().contains(needle)
+        return FuzzySearch.ranked(sourceFiltered, query: query) { entry in
+            [entry.title, entry.preview, entry.source, entry.body]
         }
     }
 
@@ -5491,7 +5511,7 @@ struct SettingsView: View {
     }
 
     private var filteredAgents: [AgentSessionRow] {
-        gatewayStore.snapshot.agentSessions.rows.filter { agent in
+        let baseRows = gatewayStore.snapshot.agentSessions.rows.filter { agent in
             let matchesFilter: Bool
             switch agentFilter {
             case .all:
@@ -5502,12 +5522,14 @@ struct SettingsView: View {
                 matchesFilter = !agent.isActive
             }
 
-            guard matchesFilter else { return false }
+            return matchesFilter
+        }
 
-            let query = agentSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !query.isEmpty else { return true }
-            let haystack = [agent.title, agent.id, agent.source, agent.model].joined(separator: " ").lowercased()
-            return haystack.contains(query.lowercased())
+        let query = agentSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return baseRows }
+
+        return FuzzySearch.ranked(baseRows, query: query) { agent in
+            agentSearchFields(agent)
         }
     }
 
@@ -5520,8 +5542,8 @@ struct SettingsView: View {
     }
 
     private var selectedAgent: AgentSessionRow? {
-        guard let selectedAgentID else { return filteredAgents.first ?? gatewayStore.snapshot.agentSessions.rows.first }
-        return gatewayStore.snapshot.agentSessions.rows.first(where: { $0.id == selectedAgentID })
+        guard let selectedAgentID else { return filteredAgents.first }
+        return filteredAgents.first(where: { $0.id == selectedAgentID }) ?? filteredAgents.first
     }
 
     private var selectedAgentBindingEntry: SessionBindingEntry? {
@@ -5531,6 +5553,16 @@ struct SettingsView: View {
 
     private func bindingEntry(for agent: AgentSessionRow) -> SessionBindingEntry? {
         gatewayStore.snapshot.bindingEntry(for: agent.id)
+    }
+
+    private func agentSearchFields(_ agent: AgentSessionRow) -> [String] {
+        [
+            agent.title,
+            agent.id,
+            agent.source,
+            agent.model,
+            agentTranscriptSearchTextByID[agent.id] ?? "",
+        ]
     }
 
     private var canSaveHermes: Bool {
@@ -6125,7 +6157,7 @@ struct SettingsView: View {
     }
 
     private func syncAgentSelection() {
-        let rows = gatewayStore.snapshot.agentSessions.rows
+        let rows = filteredAgents
         if let selectedAgentID, rows.contains(where: { $0.id == selectedAgentID }) {
             if let current = rows.first(where: { $0.id == selectedAgentID }) {
                 agentRenameDraft = current.title
@@ -6134,11 +6166,54 @@ struct SettingsView: View {
         }
         selectedAgentID = rows.first?.id
         agentRenameDraft = rows.first?.title ?? ""
+        if rows.isEmpty {
+            selectedAgentTranscript = nil
+        }
     }
 
     private func reloadKnowledgeCatalogs() {
         reloadMemoryEntries()
         reloadSkillEntries()
+    }
+
+    private func reloadAgentSearchIndex() {
+        let settingsID = settingsStore.settings.id
+        let agents = gatewayStore.snapshot.agentSessions.rows
+        let agentIDs = agents.map(\.id)
+        let currentIDSet = Set(agentIDs)
+
+        agentTranscriptSearchTextByID = agentTranscriptSearchTextByID.filter { currentIDSet.contains($0.key) }
+
+        guard !agents.isEmpty else {
+            isLoadingAgentSearchIndex = false
+            syncAgentSelection()
+            return
+        }
+
+        isLoadingAgentSearchIndex = true
+
+        Task(priority: .utility) {
+            var index: [String: String] = [:]
+
+            for agent in agents {
+                guard let transcript = SessionTranscriptLoader.load(from: agent.transcriptURL) else {
+                    continue
+                }
+
+                let searchableText = transcript.searchableText.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !searchableText.isEmpty else { continue }
+                index[agent.id] = searchableText
+            }
+
+            await MainActor.run {
+                guard settingsStore.settings.id == settingsID else { return }
+                guard gatewayStore.snapshot.agentSessions.rows.map(\.id) == agentIDs else { return }
+
+                agentTranscriptSearchTextByID = index
+                isLoadingAgentSearchIndex = false
+                syncAgentSelection()
+            }
+        }
     }
 
     private func reloadMemoryEntries() {
