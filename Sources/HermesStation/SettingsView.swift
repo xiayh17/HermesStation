@@ -1,7 +1,7 @@
 import SwiftUI
 import Charts
 
-private enum SettingsTab: Hashable {
+private enum SettingsTab: Hashable, CaseIterable {
     case station
     case general
     case model
@@ -204,6 +204,28 @@ private struct HermesProfileOverview: Identifiable {
     let runtimeExists: Bool
 }
 
+private struct SettingsTabPage: Identifiable {
+    let id: SettingsTab
+    let title: String
+    let systemImage: String
+    let view: AnyView
+}
+
+private struct SettingsTabHost: View {
+    @Binding var selectedTab: SettingsTab
+    let pages: [SettingsTabPage]
+
+    var body: some View {
+        TabView(selection: $selectedTab) {
+            ForEach(pages) { page in
+                page.view
+                    .tabItem { Label(page.title, systemImage: page.systemImage) }
+                    .tag(page.id)
+            }
+        }
+    }
+}
+
 struct SettingsView: View {
     @EnvironmentObject private var settingsStore: SettingsStore
     @EnvironmentObject private var profileStore: HermesProfileStore
@@ -268,118 +290,108 @@ struct SettingsView: View {
     @State private var isCheckingModelHealth = false
     @State private var modelHealthFixMessage: String?
     @State private var newAliasName: String = ""
+    @State private var researchPackSnapshot: HermesResearchPackSnapshot?
+    @State private var contentPackSnapshot: HermesContentPackSnapshot?
+    @State private var isLoadingPacks = false
+    @State private var applyingPackKinds: Set<HermesPackKind> = []
+    @State private var inFlightPackStepIDs: Set<String> = []
+    @State private var packMessages: [HermesPackKind: String] = [:]
+    @State private var packReceipts: [String: HermesPackStepReceipt] = [:]
+    @State private var activePackSheet: HermesPackKind?
 
     var body: some View {
-        TabView(selection: $selectedTab) {
-            stationTab
-                .tabItem { Label("Hermes", systemImage: "square.grid.2x2") }
-                .tag(SettingsTab.station)
-            generalTab
-                .tabItem { Label("通用", systemImage: "gearshape") }
-                .tag(SettingsTab.general)
-            modelTab
-                .tabItem { Label("模型", systemImage: "cpu") }
-                .tag(SettingsTab.model)
-            agentTab
-                .tabItem { Label("Sessions", systemImage: "person.2") }
-                .tag(SettingsTab.sessions)
-            memoryTab
-                .tabItem { Label("Memory", systemImage: "brain.head.profile") }
-                .tag(SettingsTab.memory)
-            skillsTab
-                .tabItem { Label("Skills", systemImage: "wand.and.stars") }
-                .tag(SettingsTab.skills)
-            HermesToolsSettingsView(settings: settingsStore.settings)
-                .tabItem { Label("Tools", systemImage: "wrench.and.screwdriver") }
-                .tag(SettingsTab.tools)
-            HermesCronJobsSettingsView(settings: settingsStore.settings)
-                .tabItem { Label("Cron", systemImage: "clock.badge") }
-                .tag(SettingsTab.cronjobs)
-            usageTab
-                .tabItem { Label("Usage", systemImage: "chart.bar") }
-                .tag(SettingsTab.usage)
-            platformsTab
-                .tabItem { Label("Platforms", systemImage: "network") }
-                .tag(SettingsTab.platforms)
-            environmentTab
-                .tabItem { Label("环境", systemImage: "folder") }
-                .tag(SettingsTab.environment)
-        }
-        .frame(minWidth: 980, idealWidth: 1080, minHeight: 620, idealHeight: 720)
-        .onAppear {
-            guard !hasLoadedDraft else { return }
-            syncDrafts()
-            refreshPlatformInstances()
-            reloadKnowledgeCatalogs()
-            reloadAgentSearchIndex()
-            hasLoadedDraft = true
-        }
-        .onChange(of: settingsStore.settings) { _, newValue in
-            appDraft = newValue
-            platformDraftOverrides = [:]
-            platformStatusMessage = nil
-            selectedPlatformInstanceID = nil
-            refreshPlatformInstances()
-            syncModelSelection()
-            reloadKnowledgeCatalogs()
-            reloadAgentSearchIndex()
-        }
-        .onChange(of: profileStore.snapshot) { _, newValue in
-            hermesDraft = newValue.draft
-            auxiliaryProviderDrafts = Dictionary(uniqueKeysWithValues: newValue.routing.auxiliaryRoutes.map { ($0.task, $0.provider) })
-            syncSmartRoutingDrafts(from: newValue.routing)
-            refreshPlatformInstances()
-            refreshPlatformDiagnostics()
-        }
-        .onChange(of: gatewayStore.snapshot.trustedRuntime?.updatedAt) { _, _ in
-            refreshPlatformDiagnostics()
-        }
-        .onChange(of: gatewayStore.snapshot.serviceStatus) { _, _ in
-            refreshPlatformDiagnostics()
-        }
-        .onChange(of: selectedPlatformInstanceID) { _, _ in
-            refreshPlatformDiagnostics()
-        }
-        .onChange(of: selectedModelProviderID) { _, _ in
-            syncSelectedSavedModel()
-        }
-        .onChange(of: selectedModelSidebarDestination) { _, newValue in
-            if case let .provider(id) = newValue {
-                selectedModelProviderID = id
+        settingsContent
+    }
+
+    private var settingsContent: some View {
+        let pages = makeSettingsTabPages()
+        let host = SettingsTabHost(selectedTab: $selectedTab, pages: pages)
+        let base = AnyView(
+            host
+                .frame(minWidth: 980, idealWidth: 1080, minHeight: 620, idealHeight: 720)
+                .sheet(item: $activePackSheet) { pack in
+                    packSheet(for: pack)
+                }
+        )
+
+        return base
+            .onAppear {
+                guard !hasLoadedDraft else { return }
+                syncDrafts()
+                refreshPlatformInstances()
+                reloadKnowledgeCatalogs()
+                reloadAgentSearchIndex()
+                loadCapabilityPacks()
+                hasLoadedDraft = true
+            }
+            .onChange(of: settingsStore.settings) { _, newValue in
+                appDraft = newValue
+                platformDraftOverrides = [:]
+                platformStatusMessage = nil
+                selectedPlatformInstanceID = nil
+                refreshPlatformInstances()
+                syncModelSelection()
+                reloadKnowledgeCatalogs()
+                reloadAgentSearchIndex()
+                loadCapabilityPacks()
+            }
+            .onChange(of: profileStore.snapshot) { _, newValue in
+                hermesDraft = newValue.draft
+                auxiliaryProviderDrafts = Dictionary(uniqueKeysWithValues: newValue.routing.auxiliaryRoutes.map { ($0.task, $0.provider) })
+                syncSmartRoutingDrafts(from: newValue.routing)
+                refreshPlatformInstances()
+                refreshPlatformDiagnostics()
+                loadCapabilityPacks()
+            }
+            .onChange(of: stationDiagnosticsTrigger) { _, _ in
+                refreshPlatformDiagnostics()
+                loadCapabilityPacks()
+            }
+            .onChange(of: selectedModelProviderID) { _, _ in
                 syncSelectedSavedModel()
             }
-        }
-        .onChange(of: selectedAgentID) { _, newValue in
-            guard let newValue, let agent = gatewayStore.snapshot.agentSessions.rows.first(where: { $0.id == newValue }) else {
-                agentRenameDraft = ""
-                selectedAgentTranscript = nil
-                return
+            .onChange(of: selectedModelSidebarDestination) { _, newValue in
+                if case let .provider(id) = newValue {
+                    selectedModelProviderID = id
+                    syncSelectedSavedModel()
+                }
             }
-            agentRenameDraft = agent.title
-            loadTranscript(for: agent)
-        }
-        .onChange(of: agentSearchText) { _, _ in
-            syncAgentSelection()
-        }
-        .onChange(of: agentFilter) { _, _ in
-            syncAgentSelection()
-        }
-        .onChange(of: memorySearchText) { _, _ in
-            syncMemorySelection()
-        }
-        .onChange(of: memorySourceFilter) { _, _ in
-            syncMemorySelection()
-        }
-        .onChange(of: skillSearchText) { _, _ in
-            syncSkillSelection()
-        }
-        .onChange(of: skillFilter) { _, _ in
-            syncSkillSelection()
-        }
-        .onChange(of: gatewayStore.snapshot.agentSessions.rows.map(\.id)) { _, _ in
-            syncAgentSelection()
-            reloadAgentSearchIndex()
-        }
+            .onChange(of: selectedAgentID) { _, newValue in
+                guard let newValue, let agent = gatewayStore.snapshot.agentSessions.rows.first(where: { $0.id == newValue }) else {
+                    agentRenameDraft = ""
+                    selectedAgentTranscript = nil
+                    return
+                }
+                agentRenameDraft = agent.title
+                loadTranscript(for: agent)
+            }
+            .onChange(of: agentSelectionTrigger) { _, _ in
+                syncAgentSelection()
+                reloadAgentSearchIndex()
+            }
+            .onChange(of: memoryFilterTrigger) { _, _ in
+                syncMemorySelection()
+            }
+            .onChange(of: skillFilterTrigger) { _, _ in
+                syncSkillSelection()
+                loadCapabilityPacks()
+            }
+    }
+
+    private func makeSettingsTabPages() -> [SettingsTabPage] {
+        [
+            SettingsTabPage(id: .station, title: "Hermes", systemImage: "square.grid.2x2", view: AnyView(stationTab)),
+            SettingsTabPage(id: .general, title: "通用", systemImage: "gearshape", view: AnyView(generalTab)),
+            SettingsTabPage(id: .model, title: "模型", systemImage: "cpu", view: AnyView(modelTab)),
+            SettingsTabPage(id: .sessions, title: "Sessions", systemImage: "person.2", view: AnyView(agentTab)),
+            SettingsTabPage(id: .memory, title: "Memory", systemImage: "brain.head.profile", view: AnyView(memoryTab)),
+            SettingsTabPage(id: .skills, title: "Skills", systemImage: "wand.and.stars", view: AnyView(skillsTab)),
+            SettingsTabPage(id: .tools, title: "Tools", systemImage: "wrench.and.screwdriver", view: AnyView(HermesToolsSettingsView(settings: settingsStore.settings))),
+            SettingsTabPage(id: .cronjobs, title: "Cron", systemImage: "clock.badge", view: AnyView(HermesCronJobsSettingsView(settings: settingsStore.settings))),
+            SettingsTabPage(id: .usage, title: "Usage", systemImage: "chart.bar", view: AnyView(usageTab)),
+            SettingsTabPage(id: .platforms, title: "Platforms", systemImage: "network", view: AnyView(platformsTab)),
+            SettingsTabPage(id: .environment, title: "环境", systemImage: "folder", view: AnyView(environmentTab)),
+        ]
     }
 
     // MARK: - Station
@@ -388,6 +400,7 @@ struct SettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 stationCommandCenterSection
+                stationCapabilitiesSection
                 stationRuntimeHealthSection
                 stationMessagingSection
                 stationFleetSection
@@ -452,6 +465,59 @@ struct SettingsView: View {
 
                     Button("环境与版本") {
                         selectedTab = .environment
+                    }
+                }
+            }
+            .padding(.top, 4)
+        }
+    }
+
+    private var stationCapabilitiesSection: some View {
+        GroupBox("Capability Home") {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("先回答“这台 Hermes 现在能做什么”。这一层把运行态、配置、记忆、skills、cron 和平台状态压成 6 个能力域，帮助我们先看 readiness，再决定去哪个高级面板。")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: 8) {
+                    summaryPill(title: "Ready", value: "\(stationCapabilityCards.filter { $0.readiness == .ready }.count)")
+                    summaryPill(title: "Partial", value: "\(stationCapabilityCards.filter { $0.readiness == .partial }.count)")
+                    summaryPill(title: "Watch", value: "\(stationCapabilityCards.filter { $0.readiness == .degraded || $0.readiness == .blocked }.count)")
+                    Spacer()
+                    Button("Research Pack") {
+                        activePackSheet = .research
+                    }
+                    .disabled(isLoadingPacks)
+                    Button("Content Pack") {
+                        activePackSheet = .content
+                    }
+                    .disabled(isLoadingPacks)
+                }
+
+                if let topGap = stationTopGapCard {
+                    stationInfoBanner(
+                        title: "Top Gap: \(topGap.domain.title)",
+                        message: topGap.summary,
+                        color: stationCapabilityReadinessColor(topGap.readiness)
+                    )
+                }
+
+                if !stationCapabilityRecommendations.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Recommended Next Moves")
+                            .font(.system(size: 12, weight: .semibold))
+                        LazyVGrid(columns: stationGridColumns, alignment: .leading, spacing: 12) {
+                            ForEach(stationCapabilityRecommendations) { recommendation in
+                                stationCapabilityRecommendationCard(recommendation)
+                            }
+                        }
+                    }
+                }
+
+                LazyVGrid(columns: stationGridColumns, alignment: .leading, spacing: 12) {
+                    ForEach(stationCapabilityCards) { card in
+                        stationCapabilityCard(card)
                     }
                 }
             }
@@ -3897,6 +3963,60 @@ struct SettingsView: View {
         }
     }
 
+    private var stationCapabilityCards: [HermesCapabilityCard] {
+        HermesCapabilityEvaluator.evaluate(
+            settings: settingsStore.settings,
+            gatewaySnapshot: gatewayStore.snapshot,
+            profileSnapshot: profileStore.snapshot,
+            platformInstances: platformInstancesCache,
+            memoryEntries: memoryEntries,
+            skillEntries: skillEntries
+        )
+        .sorted { lhs, rhs in
+            if lhs.readiness.rank != rhs.readiness.rank {
+                return lhs.readiness.rank > rhs.readiness.rank
+            }
+            if lhs.warningDependencyCount != rhs.warningDependencyCount {
+                return lhs.warningDependencyCount > rhs.warningDependencyCount
+            }
+            return lhs.domain.title < rhs.domain.title
+        }
+    }
+
+    private var stationTopGapCard: HermesCapabilityCard? {
+        stationCapabilityCards.first { $0.readiness != .ready }
+    }
+
+    private var stationCapabilityRecommendations: [HermesCapabilityRecommendation] {
+        HermesCapabilityEvaluator.recommendations(
+            from: stationCapabilityCards,
+            platformInstances: platformInstancesCache
+        )
+    }
+
+    private var stationDiagnosticsTrigger: String {
+        [
+            gatewayStore.snapshot.trustedRuntime?.updatedAt ?? "",
+            gatewayStore.snapshot.serviceStatus.rawValue,
+            selectedPlatformInstanceID ?? "",
+            String(gatewayStore.snapshot.doctorReport?.ranAt.timeIntervalSinceReferenceDate ?? 0)
+        ].joined(separator: "|")
+    }
+
+    private var agentSelectionTrigger: String {
+        let ids = gatewayStore.snapshot.agentSessions.rows.map(\.id).joined(separator: ",")
+        return [agentSearchText, agentFilter.rawValue, ids].joined(separator: "|")
+    }
+
+    private var memoryFilterTrigger: String {
+        [memorySearchText, memorySourceFilter].joined(separator: "|")
+    }
+
+    private var skillFilterTrigger: String {
+        let ids = skillEntries.map(\.id).joined(separator: ",")
+        return [skillSearchText, skillFilter.rawValue, ids].joined(separator: "|")
+    }
+
     private var gatewayRuntimeHeadline: String {
         if gatewayStore.snapshot.runtimeIsStale {
             return "stale runtime"
@@ -3962,6 +4082,212 @@ struct SettingsView: View {
         .padding(10)
         .background(color.opacity(0.08))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func stationCapabilityCard(_ card: HermesCapabilityCard) -> some View {
+        let highlightedDependencies = stationHighlightedDependencies(for: card)
+
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: card.domain.icon)
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(stationCapabilityDomainColor(card.domain))
+                    .frame(width: 24, alignment: .top)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(card.domain.title)
+                        .font(.system(size: 15, weight: .semibold))
+                    Text(card.domain.subtitle)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 8)
+                statusBadge(card.readiness.label, color: stationCapabilityReadinessColor(card.readiness))
+            }
+
+            Text(card.summary)
+                .font(.system(size: 12))
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 8) {
+                summaryPill(title: "Readiness", value: card.progressLabel)
+                if card.warningDependencyCount > 0 {
+                    summaryPill(title: "Attention", value: "\(card.warningDependencyCount)")
+                }
+            }
+
+            if let providerLine = card.providerLine, !providerLine.isEmpty {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "cpu")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                    Text(providerLine)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            if let evidenceLine = card.evidenceLine, !evidenceLine.isEmpty {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "waveform.path.ecg")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                    Text(evidenceLine)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(highlightedDependencies) { dependency in
+                    HStack(alignment: .top, spacing: 8) {
+                        Circle()
+                            .fill(stationCapabilityDependencyColor(dependency.state))
+                            .frame(width: 8, height: 8)
+                            .padding(.top, 4)
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text(dependency.title)
+                                    .font(.system(size: 11, weight: .medium))
+                                Text(dependency.state.label)
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(stationCapabilityDependencyColor(dependency.state))
+                            }
+                            Text(dependency.detail)
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            }
+
+            HStack {
+                Button(stationCapabilityPrimaryActionTitle(for: card)) {
+                    performStationCapabilityPrimaryAction(for: card)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(gatewayStore.isBusy || profileStore.isSaving)
+
+                Button(stationCapabilitySecondaryActionTitle(for: card)) {
+                    performStationCapabilitySecondaryAction(for: card)
+                }
+                .disabled(gatewayStore.isBusy || profileStore.isSaving)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Color.secondary.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func stationCapabilityRecommendationCard(_ recommendation: HermesCapabilityRecommendation) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "sparkles")
+                    .foregroundStyle(Color.accentColor)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(recommendation.title)
+                        .font(.system(size: 13, weight: .semibold))
+                    Text(recommendation.targetDomains.map(\.title).joined(separator: " + "))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+
+            Text(recommendation.summary)
+                .font(.system(size: 11))
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text(recommendation.reason)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button(recommendation.actionTitle) {
+                performStationRecommendationAction(recommendation)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(gatewayStore.isBusy || profileStore.isSaving)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Color.accentColor.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    @ViewBuilder
+    private func packSheet(for pack: HermesPackKind) -> some View {
+        switch pack {
+        case .research:
+            HermesPackSheetView(
+                icon: "magnifyingglass.circle.fill",
+                title: "Research Pack",
+                intro: "这一版会自动完成 HermesStation 已经能安全托管的研究能力改动：搜索后端、CLI toolsets、内置 research/document skills，以及 doctor 校准。需要外部密钥或第三方依赖的部分会单独列出来，不会偷偷修改。",
+                safeChangesDescription: "These steps are backed by Hermes CLI mutations and can be applied directly from HermesStation.",
+                whyText: "Research Pack 把“研究助手”压成一个具体本地状态：可用的搜索后端、启用的 web/browser 工具、启用的 research/document skills，以及 doctor-backed trust baseline。",
+                message: packMessages[.research],
+                isLoading: isLoadingPacks,
+                isApplyingAll: applyingPackKinds.contains(.research),
+                steps: researchPackSnapshot?.steps ?? [],
+                optionalUpgrades: researchPackSnapshot?.optionalUpgrades ?? [],
+                receipts: packReceipts,
+                inFlightStepIDs: inFlightPackStepIDs,
+                supportActions: [
+                    HermesPackSupportAction(id: "research-env", title: "Open .env") {
+                        profileStore.openEnvFile()
+                    },
+                    HermesPackSupportAction(id: "research-tools", title: "Open Tools") {
+                        selectedTab = .tools
+                        activePackSheet = nil
+                    },
+                    HermesPackSupportAction(id: "research-skills", title: "Open Skills") {
+                        selectedTab = .skills
+                        activePackSheet = nil
+                    }
+                ],
+                onRefresh: loadCapabilityPacks,
+                onApplyAll: applyResearchPackSafeChanges,
+                onApplyStep: applyResearchPackStep
+            )
+
+        case .content:
+            HermesPackSheetView(
+                icon: "paintpalette.fill",
+                title: "Content Pack",
+                intro: "这一版会自动补齐内容创作常用的 Hermes 基础能力：creative toolsets、内容 skills 和 doctor 校准。图像或高质量音频 provider 这类需要外部密钥的升级，会明确列成手动步骤。",
+                safeChangesDescription: "These steps are safe CLI-backed mutations that move Hermes from generic chat toward repeatable content output.",
+                whyText: "Content Pack 把“能产出”拆成可执行的配置面：image/tts/vision/skills toolsets、内容相关 skills，以及一条 doctor-backed trust path。",
+                message: packMessages[.content],
+                isLoading: isLoadingPacks,
+                isApplyingAll: applyingPackKinds.contains(.content),
+                steps: contentPackSnapshot?.steps ?? [],
+                optionalUpgrades: contentPackSnapshot?.optionalUpgrades ?? [],
+                receipts: packReceipts,
+                inFlightStepIDs: inFlightPackStepIDs,
+                supportActions: [
+                    HermesPackSupportAction(id: "content-env", title: "Open .env") {
+                        profileStore.openEnvFile()
+                    },
+                    HermesPackSupportAction(id: "content-models", title: "Open Models") {
+                        selectedTab = .model
+                        activePackSheet = nil
+                    },
+                    HermesPackSupportAction(id: "content-skills", title: "Open Skills") {
+                        selectedTab = .skills
+                        activePackSheet = nil
+                    }
+                ],
+                onRefresh: loadCapabilityPacks,
+                onApplyAll: applyContentPackSafeChanges,
+                onApplyStep: applyContentPackStep
+            )
+        }
     }
 
     private func stationLatestRequestDumpCard(_ dump: LatestRequestDumpSnapshot) -> some View {
@@ -4420,6 +4746,285 @@ struct SettingsView: View {
         .padding(.vertical, 6)
         .background(Color.secondary.opacity(0.08))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func stationHighlightedDependencies(for card: HermesCapabilityCard) -> [HermesCapabilityDependency] {
+        card.dependencies
+            .sorted { lhs, rhs in
+                let left = stationCapabilityDependencyRank(lhs.state)
+                let right = stationCapabilityDependencyRank(rhs.state)
+                if left != right {
+                    return left > right
+                }
+                return lhs.title < rhs.title
+            }
+            .prefix(3)
+            .map { $0 }
+    }
+
+    private func stationCapabilityDependencyRank(_ state: HermesCapabilityDependencyState) -> Int {
+        switch state {
+        case .blocked: return 3
+        case .warning: return 2
+        case .info: return 1
+        case .ok: return 0
+        }
+    }
+
+    private func stationCapabilityDomainColor(_ domain: HermesCapabilityDomain) -> Color {
+        switch domain {
+        case .identity: return .blue
+        case .memory: return .purple
+        case .perception: return .cyan
+        case .expression: return .orange
+        case .automation: return .green
+        case .observability: return .pink
+        }
+    }
+
+    private func stationCapabilityReadinessColor(_ readiness: HermesCapabilityReadiness) -> Color {
+        switch readiness {
+        case .ready: return .green
+        case .partial: return .blue
+        case .blocked: return .red
+        case .unverified: return .secondary
+        case .degraded: return .orange
+        }
+    }
+
+    private func stationCapabilityDependencyColor(_ state: HermesCapabilityDependencyState) -> Color {
+        switch state {
+        case .ok: return .green
+        case .info: return .blue
+        case .warning: return .orange
+        case .blocked: return .red
+        }
+    }
+
+    private func stationCapabilityPrimaryActionTitle(for card: HermesCapabilityCard) -> String {
+        switch card.domain {
+        case .identity:
+            return card.readiness == .blocked ? "Open Models" : "Open General"
+        case .memory:
+            return "Open Memory"
+        case .perception:
+            return "Open Platforms"
+        case .expression:
+            return "Open Models"
+        case .automation:
+            return "Open Cron"
+        case .observability:
+            if let doctorStatus = gatewayStore.snapshot.doctorReport?.status,
+               doctorStatus == .needsAttention || doctorStatus == .failed {
+                return "Doctor --fix"
+            }
+            if gatewayStore.snapshot.doctorReport == nil {
+                return "Doctor --fix"
+            }
+            return "Open Usage"
+        }
+    }
+
+    private func stationCapabilitySecondaryActionTitle(for card: HermesCapabilityCard) -> String {
+        switch card.domain {
+        case .identity:
+            return "Open Hermes"
+        case .memory:
+            return "Open Skills"
+        case .perception:
+            return "Open Tools"
+        case .expression:
+            return "Open Tools"
+        case .automation:
+            return "Open Platforms"
+        case .observability:
+            return "Open Environment"
+        }
+    }
+
+    private func performStationCapabilityPrimaryAction(for card: HermesCapabilityCard) {
+        switch card.domain {
+        case .identity:
+            selectedTab = card.readiness == .blocked ? .model : .general
+        case .memory:
+            selectedTab = .memory
+        case .perception:
+            selectedTab = .platforms
+        case .expression:
+            selectedTab = .model
+        case .automation:
+            selectedTab = .cronjobs
+        case .observability:
+            if let doctorStatus = gatewayStore.snapshot.doctorReport?.status,
+               doctorStatus == .needsAttention || doctorStatus == .failed {
+                gatewayStore.runDoctorFix()
+                return
+            }
+            if gatewayStore.snapshot.doctorReport == nil {
+                gatewayStore.runDoctorFix()
+                return
+            }
+            selectedTab = .usage
+        }
+    }
+
+    private func performStationCapabilitySecondaryAction(for card: HermesCapabilityCard) {
+        switch card.domain {
+        case .identity:
+            selectedTab = .station
+        case .memory:
+            selectedTab = .skills
+        case .perception:
+            selectedTab = .tools
+        case .expression:
+            selectedTab = .tools
+        case .automation:
+            selectedTab = .platforms
+        case .observability:
+            selectedTab = .environment
+        }
+    }
+
+    private func performStationRecommendationAction(_ recommendation: HermesCapabilityRecommendation) {
+        switch recommendation.id {
+        case "baseline":
+            if recommendation.actionTitle == "Open Models" {
+                selectedTab = .model
+            } else {
+                selectedTab = .general
+            }
+        case "research":
+            activePackSheet = .research
+        case "content":
+            activePackSheet = .content
+        case "automation":
+            if recommendation.actionTitle == "Open Platforms" {
+                selectedTab = .platforms
+            } else {
+                selectedTab = .cronjobs
+            }
+        case "trust":
+            gatewayStore.runDoctorFix()
+        default:
+            selectedTab = .station
+        }
+    }
+
+    private func loadCapabilityPacks() {
+        let settingsID = settingsStore.settings.id
+        let currentSettings = settingsStore.settings
+        let currentSkills = skillEntries
+        let currentDoctor = gatewayStore.snapshot.doctorReport
+
+        isLoadingPacks = true
+
+        Task {
+            let researchSnapshot = await HermesResearchPackPlanner.load(
+                settings: currentSettings,
+                skillEntries: currentSkills,
+                doctorReport: currentDoctor
+            )
+            let contentSnapshot = await HermesContentPackPlanner.load(
+                settings: currentSettings,
+                skillEntries: currentSkills,
+                doctorReport: currentDoctor
+            )
+            await MainActor.run {
+                guard settingsStore.settings.id == settingsID else { return }
+                researchPackSnapshot = researchSnapshot
+                contentPackSnapshot = contentSnapshot
+                isLoadingPacks = false
+            }
+        }
+    }
+
+    private func applyResearchPackSafeChanges() {
+        guard let snapshot = researchPackSnapshot, !applyingPackKinds.contains(.research) else { return }
+        applyPack(kind: .research) {
+            try await HermesResearchPackPlanner.applySafeChanges(settings: settingsStore.settings, snapshot: snapshot)
+        }
+    }
+
+    private func applyContentPackSafeChanges() {
+        guard let snapshot = contentPackSnapshot, !applyingPackKinds.contains(.content) else { return }
+        applyPack(kind: .content) {
+            try await HermesContentPackPlanner.applySafeChanges(settings: settingsStore.settings, snapshot: snapshot)
+        }
+    }
+
+    private func applyResearchPackStep(_ step: HermesResearchPackStep) {
+        applyPackStep(kind: .research, step: step)
+    }
+
+    private func applyContentPackStep(_ step: HermesResearchPackStep) {
+        applyPackStep(kind: .content, step: step)
+    }
+
+    private func applyPackStep(kind: HermesPackKind, step: HermesResearchPackStep) {
+        guard step.canRunIndividually, !inFlightPackStepIDs.contains(step.id) else { return }
+        inFlightPackStepIDs.insert(step.id)
+        packMessages[kind] = nil
+
+        Task {
+            do {
+                let receipt = try await HermesPackExecutor.apply(step: step, settings: settingsStore.settings)
+                await MainActor.run {
+                    inFlightPackStepIDs.remove(step.id)
+                    packReceipts[step.id] = receipt
+                    packMessages[kind] = receipt.summary
+                    reloadSkillEntries()
+                    gatewayStore.refresh()
+                    loadCapabilityPacks()
+                }
+            } catch {
+                await MainActor.run {
+                    inFlightPackStepIDs.remove(step.id)
+                    packReceipts[step.id] = HermesPackStepReceipt(
+                        id: "\(step.id)-failure-\(UUID().uuidString)",
+                        stepID: step.id,
+                        status: .failure,
+                        summary: "Failed to run \(step.title).",
+                        output: error.localizedDescription,
+                        ranAt: Date()
+                    )
+                    packMessages[kind] = "Failed to run \(step.title): \(error.localizedDescription)"
+                    gatewayStore.refresh()
+                    loadCapabilityPacks()
+                }
+            }
+        }
+    }
+
+    private func applyPack(
+        kind: HermesPackKind,
+        task: @escaping () async throws -> [HermesPackStepReceipt]
+    ) {
+        guard !applyingPackKinds.contains(kind) else { return }
+        applyingPackKinds.insert(kind)
+        packMessages[kind] = nil
+
+        Task {
+            do {
+                let receipts = try await task()
+                await MainActor.run {
+                    for receipt in receipts {
+                        packReceipts[receipt.stepID] = receipt
+                    }
+                    packMessages[kind] = receipts.map(\.summary).joined(separator: "\n\n")
+                    applyingPackKinds.remove(kind)
+                    reloadSkillEntries()
+                    gatewayStore.refresh()
+                    loadCapabilityPacks()
+                }
+            } catch {
+                await MainActor.run {
+                    packMessages[kind] = "Failed to apply \(kind.title): \(error.localizedDescription)"
+                    applyingPackKinds.remove(kind)
+                    gatewayStore.refresh()
+                    loadCapabilityPacks()
+                }
+            }
+        }
     }
 
     private func skillRow(_ skill: SkillCatalogEntry) -> some View {
