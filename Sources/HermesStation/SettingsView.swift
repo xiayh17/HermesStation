@@ -15,7 +15,7 @@ private enum SettingsTab: Hashable {
     case environment
 }
 
-private enum AgentPanelFilter: String, CaseIterable, Identifiable {
+enum AgentPanelFilter: String, CaseIterable, Identifiable {
     case all
     case running
     case completed
@@ -230,7 +230,6 @@ struct SettingsView: View {
     @State private var selectedUsageWindow: UsageWindow = .last7Days
     @State private var selectedUsageMetric: UsageChartMetric = .tokens
     @State private var selectedAgentID: String?
-    @State private var hoveredAgentPreviewID: String?
     @State private var agentSearchText: String = ""
     @State private var agentFilter: AgentPanelFilter = .all
     @State private var agentTranscriptSearchTextByID: [String: String] = [:]
@@ -1466,12 +1465,47 @@ struct SettingsView: View {
     // MARK: - Agents
 
     private var agentTab: some View {
-        HStack(spacing: 0) {
-            agentSidebar
-            Divider()
-            agentDetailPanel
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        SettingsAgentSessionsPane(
+            activeCount: gatewayStore.snapshot.agentSessions.activeCount,
+            trackedCount: gatewayStore.snapshot.agentSessions.totalCount,
+            boundCount: gatewayStore.snapshot.boundSessionCount,
+            liveCountText: gatewayStore.snapshot.liveAgentCountDisplay,
+            filter: $agentFilter,
+            searchText: $agentSearchText,
+            isLoadingSearchIndex: isLoadingAgentSearchIndex,
+            filteredBoundAgents: filteredBoundAgents,
+            filteredUnboundAgents: filteredUnboundAgents,
+            selectedAgentID: $selectedAgentID,
+            selectedAgent: selectedAgent,
+            bindingForAgentID: { sessionID in
+                gatewayStore.snapshot.bindingEntry(for: sessionID)
+            },
+            selectedBindingEntry: selectedAgentBindingEntry,
+            selectedTranscript: selectedAgentTranscript,
+            isLoadingTranscript: isLoadingTranscript,
+            agentRenameDraft: $agentRenameDraft,
+            isBusy: gatewayStore.isBusy,
+            formatBindingTimestamp: formatBindingTimestamp,
+            onRename: { agent, title in
+                gatewayStore.renameAgentSession(id: agent.id, title: title)
+            },
+            onOpenTranscript: { agent in
+                gatewayStore.openTranscript(for: agent)
+            },
+            onOpenLogExcerpt: { agent in
+                gatewayStore.openLogExcerpt(for: agent)
+            },
+            onExport: { agent in
+                gatewayStore.exportAgentSession(id: agent.id)
+            },
+            onDelete: {
+                showDeleteAgentAlert = true
+            },
+            onFocusPlatform: focusPlatform,
+            onSubmitPendingAction: { type, sessionKey in
+                gatewayStore.submitPendingAction(type: type, sessionKey: sessionKey)
+            }
+        )
         .alert("Delete Agent Session?", isPresented: $showDeleteAgentAlert) {
             Button("Delete", role: .destructive) {
                 if let selectedAgent {
@@ -1489,12 +1523,19 @@ struct SettingsView: View {
     }
 
     private var memoryTab: some View {
-        HStack(spacing: 0) {
-            memorySidebar
-            Divider()
-            memoryDetailPanel
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        SettingsMemoryPane(
+            entries: memoryEntries,
+            sourceOptions: memorySourceOptions,
+            sourceFilter: $memorySourceFilter,
+            searchText: $memorySearchText,
+            filteredEntries: filteredMemoryEntries,
+            selectedEntryID: $selectedMemoryEntryID,
+            selectedEntry: selectedMemoryEntry,
+            isLoading: isLoadingMemoryEntries,
+            onReload: reloadMemoryEntries,
+            onOpenPath: openPath,
+            formatTimestamp: formatMemoryTimestamp
+        )
     }
 
     private var skillsTab: some View {
@@ -1588,149 +1629,6 @@ struct SettingsView: View {
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
-    private var agentSidebar: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                summaryPill(title: "Active", value: "\(gatewayStore.snapshot.agentSessions.activeCount)")
-                summaryPill(title: "Tracked", value: "\(gatewayStore.snapshot.agentSessions.totalCount)")
-                summaryPill(title: "Bound", value: "\(gatewayStore.snapshot.boundSessionCount)")
-                summaryPill(title: "Live", value: gatewayStore.snapshot.liveAgentCountDisplay)
-            }
-            .padding(.horizontal, 12)
-            .padding(.top, 12)
-
-            Picker("Filter", selection: $agentFilter) {
-                ForEach(AgentPanelFilter.allCases) { filter in
-                    Text(filter.title).tag(filter)
-                }
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 12)
-
-            TextField("Fuzzy search title / id / source / model / transcript", text: $agentSearchText)
-                .textFieldStyle(.roundedBorder)
-                .padding(.horizontal, 12)
-
-            if isLoadingAgentSearchIndex {
-                HStack(spacing: 6) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("Indexing transcript content for fuzzy search…")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.horizontal, 12)
-            }
-
-            List(selection: selectedAgentBinding) {
-                if !filteredBoundAgents.isEmpty {
-                    Section("Bound Sessions") {
-                        ForEach(filteredBoundAgents) { agent in
-                            agentRow(agent)
-                                .onHover { isHovering in
-                                    hoveredAgentPreviewID = isHovering ? agent.id : (hoveredAgentPreviewID == agent.id ? nil : hoveredAgentPreviewID)
-                                }
-                                .popover(
-                                    isPresented: Binding(
-                                        get: { hoveredAgentPreviewID == agent.id },
-                                        set: { isPresented in
-                                            if !isPresented, hoveredAgentPreviewID == agent.id {
-                                                hoveredAgentPreviewID = nil
-                                            }
-                                        }
-                                    ),
-                                    arrowEdge: .trailing
-                                ) {
-                                    sessionPreviewPopover(agent)
-                                }
-                                .tag(agent.id)
-                        }
-                    }
-                }
-
-                if !filteredUnboundAgents.isEmpty {
-                    Section(filteredBoundAgents.isEmpty ? "Sessions" : "Other Sessions") {
-                        ForEach(filteredUnboundAgents) { agent in
-                            agentRow(agent)
-                                .onHover { isHovering in
-                                    hoveredAgentPreviewID = isHovering ? agent.id : (hoveredAgentPreviewID == agent.id ? nil : hoveredAgentPreviewID)
-                                }
-                                .popover(
-                                    isPresented: Binding(
-                                        get: { hoveredAgentPreviewID == agent.id },
-                                        set: { isPresented in
-                                            if !isPresented, hoveredAgentPreviewID == agent.id {
-                                                hoveredAgentPreviewID = nil
-                                            }
-                                        }
-                                    ),
-                                    arrowEdge: .trailing
-                                ) {
-                                    sessionPreviewPopover(agent)
-                                }
-                                .tag(agent.id)
-                        }
-                    }
-                }
-            }
-            .listStyle(.sidebar)
-            .scrollContentBackground(.hidden)
-        }
-        .frame(minWidth: 320, idealWidth: 360, maxWidth: 420, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color(nsColor: .controlBackgroundColor))
-    }
-
-    private var memorySidebar: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                summaryPill(title: "Entries", value: "\(memoryEntries.count)")
-                summaryPill(title: "Sources", value: "\(memorySourceOptions.count)")
-                Spacer()
-                Button {
-                    reloadMemoryEntries()
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.plain)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-                .hoverPlate(cornerRadius: 6)
-            }
-            .padding(.horizontal, 12)
-            .padding(.top, 12)
-
-            Picker("Source", selection: $memorySourceFilter) {
-                Text("All").tag("All")
-                ForEach(memorySourceOptions, id: \.self) { source in
-                    Text(source).tag(source)
-                }
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 12)
-
-            TextField("Fuzzy search memory title / content / source", text: $memorySearchText)
-                .textFieldStyle(.roundedBorder)
-                .padding(.horizontal, 12)
-
-            if isLoadingMemoryEntries {
-                ProgressView()
-                    .controlSize(.small)
-                    .padding(.horizontal, 12)
-            }
-
-            List(selection: selectedMemoryEntryBinding) {
-                ForEach(filteredMemoryEntries) { entry in
-                    memoryRow(entry)
-                        .tag(entry.id)
-                }
-            }
-            .listStyle(.sidebar)
-            .scrollContentBackground(.hidden)
-        }
-        .frame(minWidth: 320, idealWidth: 360, maxWidth: 420, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color(nsColor: .controlBackgroundColor))
-    }
-
     private var skillsSidebar: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -1780,222 +1678,6 @@ struct SettingsView: View {
         }
         .frame(minWidth: 340, idealWidth: 380, maxWidth: 440, maxHeight: .infinity, alignment: .topLeading)
         .background(Color(nsColor: .controlBackgroundColor))
-    }
-
-    @ViewBuilder
-    private var agentDetailPanel: some View {
-        if let agent = selectedAgent {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack(alignment: .center, spacing: 10) {
-                                Image(systemName: agent.isActive ? "bolt.circle.fill" : "clock.arrow.circlepath")
-                                    .foregroundStyle(agent.isActive ? .green : .secondary)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(agent.title)
-                                        .font(.system(size: 18, weight: .semibold))
-                                    Text(agent.id)
-                                        .font(.system(size: 11))
-                                        .foregroundStyle(.secondary)
-                                        .textSelection(.enabled)
-                                }
-                                Spacer()
-                                Text(agent.statusText)
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .background((agent.isActive ? Color.green : Color.secondary).opacity(0.12))
-                                    .foregroundStyle(agent.isActive ? .green : .secondary)
-                                    .clipShape(Capsule())
-                            }
-                        }
-
-                        GroupBox("Actions") {
-                            VStack(alignment: .leading, spacing: 10) {
-                                HStack {
-                                    TextField("Session title", text: $agentRenameDraft)
-                                        .textFieldStyle(.roundedBorder)
-                                    Button("Rename") {
-                                        gatewayStore.renameAgentSession(id: agent.id, title: agentRenameDraft)
-                                    }
-                                    .disabled(gatewayStore.isBusy || agentRenameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                                }
-                                HStack {
-                                    Button("Open Transcript") {
-                                        gatewayStore.openTranscript(for: agent)
-                                    }
-                                    Button("Open Log Excerpt") {
-                                        gatewayStore.openLogExcerpt(for: agent)
-                                    }
-                                    Button("Export JSONL") {
-                                        gatewayStore.exportAgentSession(id: agent.id)
-                                    }
-                                    Button("Delete") {
-                                        showDeleteAgentAlert = true
-                                    }
-                                    .foregroundStyle(.red)
-                                }
-                            }
-                            .padding(.top, 4)
-                        }
-
-                        if let binding = selectedAgentBindingEntry {
-                            GroupBox("Binding") {
-                                VStack(alignment: .leading, spacing: 10) {
-                                    detailRow("Platform", binding.resolvedPlatformID)
-                                    detailRow("Session Key", binding.sessionKey)
-                                    detailRow("Bound To", binding.displayLabel)
-                                    if !binding.displaySubtitle.isEmpty {
-                                        detailRow("Context", binding.displaySubtitle)
-                                    }
-                                    detailRow("Updated", formatBindingTimestamp(binding.updatedAtDate))
-
-                                    HStack {
-                                        Button("Show Platform") {
-                                            focusPlatform(binding.resolvedPlatformID)
-                                        }
-                                        Button("Reset Binding") {
-                                            gatewayStore.submitPendingAction(type: "reset_session", sessionKey: binding.sessionKey)
-                                        }
-                                        Button("Clear Model Binding") {
-                                            gatewayStore.submitPendingAction(type: "clear_model_override", sessionKey: binding.sessionKey)
-                                        }
-                                        Button("Evict Cached Agent") {
-                                            gatewayStore.submitPendingAction(type: "evict_agent", sessionKey: binding.sessionKey)
-                                        }
-                                    }
-                                }
-                                .padding(.top, 4)
-                            }
-                        }
-
-                        GroupBox("Conversation") {
-                            VStack(alignment: .leading, spacing: 12) {
-                                if isLoadingTranscript {
-                                    ProgressView()
-                                        .padding(.vertical, 20)
-                                        .frame(maxWidth: .infinity, alignment: .center)
-                                } else if let transcript = selectedAgentTranscript {
-                                    if transcript.messages.isEmpty {
-                                        Text("No messages in transcript.")
-                                            .font(.system(size: 12))
-                                            .foregroundStyle(.secondary)
-                                    } else {
-                                        LazyVStack(alignment: .leading, spacing: 16) {
-                                            ForEach(transcript.messages) { message in
-                                                transcriptMessageRow(message)
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    Text("Transcript not available.")
-                                        .font(.system(size: 12))
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            .padding(.top, 4)
-                        }
-
-                        GroupBox("Details") {
-                            VStack(alignment: .leading, spacing: 8) {
-                                detailRow("Source", agent.source)
-                                detailRow("Model", agent.model)
-                                detailRow("Started", agent.startedAtText)
-                                detailRow("Ended", agent.endedAtText)
-                                detailRow("Status", agent.statusText)
-                                detailRow("End Reason", agent.endReason.isEmpty ? "n/a" : agent.endReason)
-                                detailRow("Messages", "\(agent.messageCount)")
-                                detailRow("Tool Calls", "\(agent.toolCallCount)")
-                                detailRow("Input Tokens", "\(agent.inputTokens)")
-                                detailRow("Output Tokens", "\(agent.outputTokens)")
-                                detailRow("Cost", agent.estimatedCostText)
-                            }
-                            .padding(.top, 4)
-                        }
-                    }
-                    .padding(20)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                }
-                .background(Color(nsColor: .windowBackgroundColor))
-            }
-        } else {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("No agent selected")
-                    .font(.system(size: 18, weight: .semibold))
-                Text("Pick a session from the left to inspect and manage it.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-        }
-    }
-
-    @ViewBuilder
-    private var memoryDetailPanel: some View {
-        if let entry = selectedMemoryEntry {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    HStack(alignment: .center, spacing: 10) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(entry.title)
-                                .font(.system(size: 18, weight: .semibold))
-                            Text(entry.fileURL.lastPathComponent)
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                                .textSelection(.enabled)
-                        }
-                        Spacer()
-                        memorySourceBadge(entry.source)
-                    }
-
-                    GroupBox("Actions") {
-                        HStack {
-                            Button("Open File") {
-                                openPath(entry.fileURL)
-                            }
-                            Button("Open Folder") {
-                                openPath(entry.fileURL.deletingLastPathComponent())
-                            }
-                            Button("Refresh") {
-                                reloadMemoryEntries()
-                            }
-                        }
-                        .padding(.top, 4)
-                    }
-
-                    GroupBox("Details") {
-                        VStack(alignment: .leading, spacing: 8) {
-                            detailRow("Source", entry.source)
-                            detailRow("Path", entry.fileURL.path)
-                            detailRow("Updated", formatMemoryTimestamp(entry.modifiedAt))
-                            detailRow("Preview", entry.preview)
-                        }
-                        .padding(.top, 4)
-                    }
-
-                    GroupBox("Content") {
-                        Text(entry.body)
-                            .font(.system(size: 13))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.top, 4)
-                    }
-                }
-                .padding(20)
-                .frame(maxWidth: .infinity, alignment: .topLeading)
-            }
-            .background(Color(nsColor: .windowBackgroundColor))
-        } else {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("No memory entry selected")
-                    .font(.system(size: 18, weight: .semibold))
-                Text("Pick a memory item from the left to inspect persisted notes for the active Hermes profile.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-        }
     }
 
     @ViewBuilder
@@ -2133,142 +1815,6 @@ struct SettingsView: View {
                 self.isLoadingTranscript = false
             }
         }
-    }
-
-    @ViewBuilder
-    private func transcriptMessageRow(_ message: TranscriptMessage) -> some View {
-        switch message.role {
-        case "user":
-            HStack {
-                Spacer(minLength: 40)
-                VStack(alignment: .trailing, spacing: 4) {
-                    Text(message.content ?? "")
-                        .font(.system(size: 13))
-                        .textSelection(.enabled)
-                }
-                .padding(10)
-                .background(Color.accentColor.opacity(0.12))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .frame(maxWidth: 480, alignment: .trailing)
-            }
-        case "assistant":
-            HStack {
-                VStack(alignment: .leading, spacing: 8) {
-                    if let reasoning = message.reasoning, !reasoning.isEmpty {
-                        HStack(alignment: .top, spacing: 6) {
-                            Image(systemName: "lightbulb.fill")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.orange)
-                            Text(reasoning)
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                                .textSelection(.enabled)
-                                .lineLimit(4)
-                        }
-                        .padding(8)
-                        .background(Color.orange.opacity(0.08))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                    }
-
-                    if let toolCalls = message.toolCalls, !toolCalls.isEmpty {
-                        ForEach(toolCalls) { toolCall in
-                            HStack(alignment: .top, spacing: 6) {
-                                Image(systemName: "hammer.fill")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(.blue)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(toolCall.function?.name ?? "Tool Call")
-                                        .font(.system(size: 11, weight: .semibold))
-                                    if let args = toolCall.function?.arguments, !args.isEmpty {
-                                        Text(args)
-                                            .font(.system(size: 10))
-                                            .foregroundStyle(.secondary)
-                                            .lineLimit(3)
-                                    }
-                                }
-                            }
-                            .padding(8)
-                            .background(Color.blue.opacity(0.08))
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                        }
-                    }
-
-                    if let content = message.content, !content.isEmpty {
-                        Text(content)
-                            .font(.system(size: 13))
-                            .textSelection(.enabled)
-                    }
-                }
-                .padding(10)
-                .background(Color.secondary.opacity(0.08))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .frame(maxWidth: 560, alignment: .leading)
-                Spacer(minLength: 40)
-            }
-        case "tool":
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "wrench.and.screwdriver")
-                            .font(.system(size: 10))
-                        Text("Tool Result")
-                            .font(.system(size: 10, weight: .semibold))
-                        if let toolCallId = message.toolCallId, !toolCallId.isEmpty {
-                            Text(toolCallId)
-                                .font(.system(size: 10))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
-                    }
-                    .foregroundStyle(.secondary)
-                    Text(message.content ?? "")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                        .lineLimit(6)
-                }
-                .padding(8)
-                .background(Color.gray.opacity(0.08))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                .frame(maxWidth: 520, alignment: .leading)
-                Spacer(minLength: 40)
-            }
-        default:
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(message.role.capitalized)
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                    Text(message.content ?? "")
-                        .font(.system(size: 12))
-                        .textSelection(.enabled)
-                }
-                .padding(8)
-                .background(Color.secondary.opacity(0.06))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                Spacer(minLength: 40)
-            }
-        }
-    }
-
-    private func sessionPreviewPopover(_ agent: AgentSessionRow) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(agent.title)
-                .font(.system(size: 13, weight: .semibold))
-                .lineLimit(2)
-            Text(agent.id)
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-            detailRow("Model", agent.model)
-            detailRow("Source", agent.source)
-            detailRow("Started", agent.startedAtText)
-            detailRow("Status", agent.statusText)
-            detailRow("Tokens", compactCount(agent.inputTokens + agent.outputTokens))
-            detailRow("Cost", agent.estimatedCostText)
-        }
-        .padding(12)
-        .frame(width: 320)
     }
 
     // MARK: - Platforms
@@ -4876,64 +4422,6 @@ struct SettingsView: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
-    private func agentRow(_ agent: AgentSessionRow) -> some View {
-        let binding = bindingEntry(for: agent)
-        return HStack(alignment: .top, spacing: 10) {
-            Circle()
-                .fill(agent.isActive ? .green : .secondary)
-                .frame(width: 8, height: 8)
-                .padding(.top, 4)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(agent.title)
-                    .font(.system(size: 12, weight: .medium))
-                    .lineLimit(1)
-                Text("\(agent.source) · \(agent.model)")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                if let binding {
-                    HStack(spacing: 6) {
-                        statusBadge(binding.resolvedPlatformID, color: .blue)
-                        Text(binding.displayLabel)
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                }
-                Text(agent.startedAtText)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-        }
-        .padding(.vertical, 3)
-        .contentShape(Rectangle())
-        .hoverPlate(cornerRadius: 6)
-    }
-
-    private func memoryRow(_ entry: MemoryCatalogEntry) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(entry.title)
-                    .font(.system(size: 12, weight: .medium))
-                    .lineLimit(1)
-                Spacer()
-                memorySourceBadge(entry.source)
-            }
-            Text(entry.preview)
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-                .lineLimit(3)
-            Text(formatMemoryTimestamp(entry.modifiedAt))
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        }
-        .padding(.vertical, 3)
-        .contentShape(Rectangle())
-        .hoverPlate(cornerRadius: 6)
-    }
-
     private func skillRow(_ skill: SkillCatalogEntry) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline) {
@@ -4969,10 +4457,6 @@ struct SettingsView: View {
                     .clipShape(Capsule())
             }
         }
-    }
-
-    private func memorySourceBadge(_ source: String) -> some View {
-        statusBadge(source, color: source == "USER" ? .blue : .secondary)
     }
 
     private func skillStatusBadge(_ isEnabled: Bool) -> some View {
@@ -5156,20 +4640,6 @@ struct SettingsView: View {
         Binding(
             get: { auxiliaryProviderDrafts[task] ?? "main" },
             set: { auxiliaryProviderDrafts[task] = $0 }
-        )
-    }
-
-    private var selectedAgentBinding: Binding<String?> {
-        Binding(
-            get: { selectedAgentID },
-            set: { selectedAgentID = $0 }
-        )
-    }
-
-    private var selectedMemoryEntryBinding: Binding<String?> {
-        Binding(
-            get: { selectedMemoryEntryID },
-            set: { selectedMemoryEntryID = $0 }
         )
     }
 
