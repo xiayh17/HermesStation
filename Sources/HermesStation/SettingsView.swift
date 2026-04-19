@@ -8,6 +8,8 @@ private enum SettingsTab: Hashable {
     case sessions
     case memory
     case skills
+    case tools
+    case cronjobs
     case usage
     case platforms
     case environment
@@ -286,6 +288,12 @@ struct SettingsView: View {
             skillsTab
                 .tabItem { Label("Skills", systemImage: "wand.and.stars") }
                 .tag(SettingsTab.skills)
+            HermesToolsSettingsView(settings: settingsStore.settings)
+                .tabItem { Label("Tools", systemImage: "wrench.and.screwdriver") }
+                .tag(SettingsTab.tools)
+            HermesCronJobsSettingsView(settings: settingsStore.settings)
+                .tabItem { Label("Cron", systemImage: "clock.badge") }
+                .tag(SettingsTab.cronjobs)
             usageTab
                 .tabItem { Label("Usage", systemImage: "chart.bar") }
                 .tag(SettingsTab.usage)

@@ -75,6 +75,22 @@ struct HermesPaths {
         hermesHome.appending(path: "logs", directoryHint: .isDirectory)
     }
 
+    var cronDir: URL {
+        hermesHome.appending(path: "cron", directoryHint: .isDirectory)
+    }
+
+    var cronJobsURL: URL {
+        cronDir.appending(path: "jobs.json")
+    }
+
+    var cronOutputDir: URL {
+        cronDir.appending(path: "output", directoryHint: .isDirectory)
+    }
+
+    func cronOutputDir(for jobID: String) -> URL {
+        cronOutputDir.appending(path: jobID, directoryHint: .isDirectory)
+    }
+
     var launchAgentLabel: String {
         "ai.hermes.gateway-\(settings.profileName)"
     }
