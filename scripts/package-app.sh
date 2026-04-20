@@ -1,22 +1,25 @@
 #!/bin/zsh
 set -euo pipefail
 
-ROOT="/Users/xiayh/Projects/hermes-station-menubar"
-BUILD_DIR="$ROOT/.build/debug"
+SCRIPT_DIR="${0:A:h}"
+ROOT="${SCRIPT_DIR:h}"
+CONFIGURATION="${CONFIGURATION:-release}"
+BUILD_DIR="$ROOT/.build/$CONFIGURATION"
 APP_DIR="$ROOT/dist/HermesStation.app"
-ZIP_PATH="$ROOT/dist/HermesStation-latest.zip"
+VERSION="${VERSION:-0.1.1}"
+ZIP_PATH="${ZIP_PATH:-$ROOT/dist/HermesStation-v${VERSION}.zip}"
+LATEST_ZIP_PATH="$ROOT/dist/HermesStation-latest.zip"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
-VERSION="0.1.0"
 BUILD_NUMBER="$(date '+%Y%m%d%H%M%S')"
 BUILD_TIMESTAMP="$(date '+%Y-%m-%d %H:%M:%S %Z')"
 
 cd "$ROOT"
-swift build
+swift build -c "$CONFIGURATION"
 
 rm -rf "$APP_DIR"
-rm -f "$ZIP_PATH"
+rm -f "$ZIP_PATH" "$LATEST_ZIP_PATH"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 
 cp "$BUILD_DIR/HermesStation" "$MACOS_DIR/HermesStation"
@@ -59,6 +62,8 @@ codesign --force --deep --sign - "$APP_DIR" >/dev/null
   cd "$ROOT/dist"
   /usr/bin/zip -qry -X "$ZIP_PATH" "HermesStation.app"
 )
+cp "$ZIP_PATH" "$LATEST_ZIP_PATH"
 
 echo "App bundle created at: $APP_DIR"
 echo "Zip archive created at: $ZIP_PATH"
+echo "Latest zip archive created at: $LATEST_ZIP_PATH"
